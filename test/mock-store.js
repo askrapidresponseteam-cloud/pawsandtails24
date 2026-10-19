@@ -31,9 +31,27 @@ let activePort = PORT;
 /* ------------------------------------------------------------- the pretend stock */
 
 const BRANDS = C.brands;
+/* Invented collections. The shop reads these through the same query it uses
+ * on the live store, so the menus are built from the API, not from a list.
+ * "frontpage" is a system collection the shop must hide, and "retired" has no
+ * products, which the shop must leave out of its menus. */
+const FIXTURE = [
+  { name: 'Pharmacy', aisles: [['All Medicines', 'pharmacy'], ['Deworming', 'deworming'], ['Flea & Tick', 'ticks-fleas'], ['Antibiotics', 'antibiotic']] },
+  { name: 'Vaccines', aisles: [['All Vaccines', 'vaccine-immunoglobulin'], ['Puppy Vaccines', 'puppy-vaccine']] },
+  { name: 'Supplements', aisles: [['Multivitamins', 'multivitamin-supplement'], ['Joint Support', 'joint-support']] },
+  { name: 'Dog Food', aisles: [['Dog Food', 'dog-food'], ['Puppy Food', 'best-puppy-food'], ['Royal Canin Dog', 'royal-canin-dog-food']] },
+  { name: 'Cat Food', aisles: [['Cat Food', 'best-cat-food'], ['Kitten Milk', 'kitten-milk']] },
+  { name: 'Treats', aisles: [['Dog Treats', 'dog-treats'], ['Cat Treats', 'cat-treats']] },
+  { name: 'Grooming', aisles: [['Grooming', 'grooming'], ['Dog Shampoo', 'dog-shampoo']] },
+  { name: 'Toys & Gear', aisles: [['Dog Toys', 'dog-toys'], ['Cat Litter', 'cat-litter'], ['Bowls', 'feeding-bowl']] },
+  { name: 'Small Pets', aisles: [['Birds', 'bird'], ['Rabbits', 'rabbit']] },
+  { name: 'Home', aisles: [['Home page', 'frontpage']] }
+];
+const EMPTY_COLLECTIONS = [{ handle: 'retired', title: 'Retired range' }];
+
 const products = [];
-C.shelves.forEach((shelf, si) => {
-  shelf.aisles.forEach((aisle, ai) => {
+FIXTURE.forEach((shelf, si) => {
+  shelf.aisles.map((a) => ({ label: a[0], handle: a[1] })).forEach((aisle, ai) => {
     const n = 3 + ((si + ai) % 3);
     for (let k = 0; k < n; k++) {
       const idx = products.length + 1;
@@ -104,6 +122,20 @@ function variantById(id) {
 }
 function inAisle(handle) { return products.filter((p) => p.aisles.indexOf(handle) >= 0); }
 
+function allCollections() {
+  const out = [];
+  FIXTURE.forEach((s) => s.aisles.forEach((a) => out.push({ handle: a[1], title: a[0] })));
+  EMPTY_COLLECTIONS.forEach((c) => out.push(c));
+  return out;
+}
+
+/* Shopify's products query: words must all match, "word*" is a prefix. */
+function matches(p, term) {
+  const hay = (p.title + ' ' + p.vendor + ' ' + p.productType).toLowerCase();
+  const words = String(term || '').toLowerCase().replace(/\*/g, '').split(/\s+/).filter(Boolean);
+  return words.every((w) => hay.indexOf(w) >= 0);
+}
+
 /* -------------------------------------------------------------------- carts */
 
 const carts = new Map();
@@ -154,18 +186,79 @@ function addLines(cart, lines) {
 
 /* ----------------------------------------------------------------- resolver */
 
-function resolve(op, v) {
+function resolve(op, v, query) {
+  if (op === 'PtCheckShop') return { shop: { name: 'Paws and Tails (mock)' } };
+
+  if (op === 'PtCheckCols') {
+    return { collections: {
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: allCollections().map((c) => ({
+        handle: c.handle, title: c.title,
+        products: { nodes: inAisle(c.handle).slice(0, 1).map((p) => ({ id: p.id })) }
+      }))
+    } };
+  }
+
+  if (op === 'PtCheckAll') {
+    return { products: { pageInfo: { hasNextPage: products.length > 24 },
+      nodes: products.slice(0, 24).map((p) => ({ handle: p.handle, availableForSale: p.availableForSale })) } };
+  }
+
+  if (op === 'PtCheckSearch') {
+    return { search: { totalCount: products.filter((p) => p.title.toLowerCase().indexOf('dog') >= 0).length } };
+  }
+
+  if (op === 'PtCheckPrefix') {
+    return { products: { nodes: products.filter((p) => matches(p, 'dog*')).slice(0, 3).map((p) => ({ handle: p.handle })) } };
+  }
+
+  if (op === 'PtCheckSuggest') {
+    return { predictiveSearch: { products: products.filter((p) => p.title.toLowerCase().indexOf('dog') >= 0)
+      .slice(0, 3).map((p) => ({ handle: p.handle })) } };
+  }
+
+  if (op === 'PtCheckPick') {
+    return { products: { nodes: [{ handle: products[0].handle }] } };
+  }
+
+  if (op === 'PtCheckProduct') {
+    const p = byHandle(v.h);
+    return { product: p ? { title: p.title, variants: { nodes: p.variants.slice(0, 5) } } : null };
+  }
+
+  if (op === 'PtCollections') {
+    const cols = allCollections();
+    const start = v.after ? Number(v.after) : 0;
+    const slice = cols.slice(start, start + 100);
+    return { collections: {
+      pageInfo: { hasNextPage: start + 100 < cols.length, endCursor: String(start + 100) },
+      nodes: slice.map((c, i) => ({
+        id: 'gid://shopify/Collection/' + (start + i + 1), handle: c.handle, title: c.title, image: null,
+        products: { nodes: inAisle(c.handle).slice(0, 1).map((p) => ({ id: p.id })) }
+      }))
+    } };
+  }
+
+  if (op === 'PtAll') {
+    let list = products.slice();
+    if (v.sortKey === 'PRICE') list.sort((a, b) => Number(a.variants[0].price.amount) - Number(b.variants[0].price.amount));
+    if (v.sortKey === 'CREATED_AT') list.reverse();
+    if (v.reverse && v.sortKey === 'PRICE') list.reverse();
+    const start = v.after ? Number(v.after) : 0;
+    return { products: {
+      pageInfo: { hasNextPage: start + 24 < list.length, endCursor: String(start + 24) },
+      nodes: list.slice(start, start + 24).map(tile)
+    } };
+  }
+
   if (op === 'PtPing') return { shop: { name: 'Paws and Tails (mock)', primaryDomain: { host: 'localhost' } } };
 
   if (op === 'PtCollection') {
     const list = inAisle(v.handle);
-    if (!list.length && !C.shelves.some((s) => s.aisles.some((a) => a.handle === v.handle))) return { collection: null };
+    if (!list.length && !allCollections().some((c) => c.handle === v.handle)) return { collection: null };
     const start = v.after ? Number(v.after) : 0;
     const slice = list.slice(start, start + 24);
-    const label = (function () {
-      for (const s of C.shelves) for (const a of s.aisles) if (a.handle === v.handle) return a.label;
-      return v.handle;
-    }());
+    const label = (allCollections().find((c) => c.handle === v.handle) || { title: v.handle }).title;
     return { collection: {
       title: label, description: 'Mock aisle: ' + label,
       products: {
@@ -189,7 +282,7 @@ function resolve(op, v) {
       const name = brand[1].replace(/\\'/g, "'").toLowerCase();
       list = products.filter((p) => p.vendor.toLowerCase() === name);
     } else {
-      list = products.filter((p) => (p.title + ' ' + p.vendor).toLowerCase().indexOf(term) >= 0);
+      list = products.filter((p) => matches(p, term));
     }
     const start = v.after ? Number(v.after) : 0;
     return { products: {
@@ -210,14 +303,17 @@ function resolve(op, v) {
   if (op === 'PtSuggest') {
     const term = String(v.q || '').toLowerCase();
     return { predictiveSearch: {
-      products: products.filter((p) => p.title.toLowerCase().indexOf(term) >= 0).slice(0, 6).map(tile),
-      collections: C.shelves[0].aisles.slice(0, 2).map((a) => ({ handle: a.handle, title: a.label }))
+      products: products.filter((p) => p.title.toLowerCase().indexOf(term) >= 0).slice(0, 8).map(tile),
+      collections: allCollections().filter((c) => c.title.toLowerCase().indexOf(term) >= 0).slice(0, 3)
+        .map((c) => ({ handle: c.handle, title: c.title }))
     } };
   }
 
   if (op === 'PtSearch') {
     const term = String(v.q || '').toLowerCase();
-    const list = products.filter((p) => (p.title + ' ' + p.vendor).toLowerCase().indexOf(term) >= 0);
+    /* The real store search is stricter than the catalogue match on purpose
+     * here, so the fallback path is exercised: it only knows whole titles. */
+    const list = products.filter((p) => p.title.toLowerCase().indexOf(term) >= 0);
     const start = v.after ? Number(v.after) : 0;
     return { search: {
       totalCount: list.length,
@@ -286,7 +382,7 @@ const server = http.createServer((req, res) => {
       let body = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { /* ignore */ }
       const m = String(body.query || '').match(/(?:query|mutation)\s+(\w+)/);
-      const out = resolve(m ? m[1] : '', body.variables || {});
+      const out = resolve(m ? m[1] : '', body.variables || {}, body.query);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(out.errors ? out : { data: out }));
     });
@@ -318,8 +414,7 @@ server.on('listening', () => { activePort = server.address().port; });
 if (require.main === module) {
   server.listen(PORT, () => {
     process.stdout.write('\n  mock store on http://localhost:' + activePort + '\n' +
-      '  ' + products.length + ' invented products across ' +
-      C.shelves.reduce((n, s) => n + s.aisles.length, 0) + ' aisles\n' +
+      '  ' + products.length + ' invented products across ' + allCollections().length + ' collections\n' +
       '  nothing here touches the live store\n\n');
   });
 }

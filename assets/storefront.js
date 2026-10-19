@@ -341,6 +341,64 @@
     });
   }
 
+  /* The store's own collections, straight from the store. The shop lists
+   * what Shopify lists, so a collection renamed, added or retired by the shop
+   * shows up here without anyone editing this code. Each one carries a single
+   * product probe, which is enough to leave the empty ones out of the menus.
+   * Up to 250, which is more than the API returns in one page. */
+  function collections(opts) {
+    opts = opts || {};
+    var query =
+      'query PtCollections($after: String) {' +
+      ' collections(first: 100, after: $after, sortKey: TITLE) {' +
+      '  pageInfo { hasNextPage endCursor }' +
+      '  nodes { id handle title image { url } products(first: 1) { nodes { id } } }' +
+      ' }' +
+      '}';
+    var found = [];
+    function page(after, depth) {
+      return gql(query, { after: after }, { cacheKey: 'cols|' + (after || ''), fresh: opts.fresh })
+        .then(function (data) {
+          var conn = (data && data.collections) || {};
+          (conn.nodes || []).forEach(function (n) {
+            if (!n || !n.handle) return;
+            found.push({
+              id: n.id,
+              handle: n.handle,
+              title: String(n.title || n.handle),
+              image: (n.image && n.image.url) || null,
+              hasProducts: !!(n.products && n.products.nodes && n.products.nodes.length)
+            });
+          });
+          var info = conn.pageInfo || {};
+          if (info.hasNextPage && info.endCursor && depth < 2) return page(info.endCursor, depth + 1);
+          return found;
+        });
+    }
+    return page(null, 0);
+  }
+
+  /* Everything the store sells, paged. This is what makes "shop all" true
+   * rather than a tour of whichever collections someone remembered. */
+  function allProducts(opts) {
+    opts = opts || {};
+    var sort = SORTS[opts.sort] || SORTS.featured;
+    var query =
+      'query PtAll($after: String, $sortKey: ProductSortKeys, $reverse: Boolean) {' +
+      ' products(first: ' + PAGE_SIZE + ', after: $after, sortKey: $sortKey, reverse: $reverse) {' +
+      '  pageInfo { hasNextPage endCursor }' +
+      '  nodes {' + TILE_FIELDS + ' }' +
+      ' }' +
+      '}';
+    return gql(query, { after: opts.after || null, sortKey: sort.key, reverse: sort.reverse },
+      { cacheKey: 'all|' + (opts.sort || 'featured') + '|' + (opts.after || ''), fresh: opts.fresh })
+      .then(function (data) {
+        var page = pageOf(data && data.products);
+        page.missing = false;
+        return page;
+      });
+  }
+
   /* ================================================================ PRODUCT */
 
   function productQuery(lean) {
@@ -435,60 +493,104 @@
 
   /* ================================================================= SEARCH */
 
-  /** As-you-type: what the store itself predicts. */
+  /* Search terms as the products query reads them: each word a prefix, so
+   * "drool" finds Drools and "roy can" finds Royal Canin. Characters that mean
+   * something to Shopify's query syntax are taken out rather than escaped. */
+  function prefixQuery(q) {
+    return String(q || '').toLowerCase()
+      .replace(/["'\\:()\[\]{}<>!^~*?]/g, ' ')
+      .split(/\s+/).filter(function (w) { return w.length > 0; })
+      .map(function (w) { return w + '*'; })
+      .join(' ');
+  }
+
+  /** As-you-type. The store's own prediction first; if the store has none,
+   *  or predicts nothing, a prefix match over the catalogue, so a shopper
+   *  typing a brand or half a product name always sees something real. */
   function suggest(q) {
     q = String(q || '').trim();
-    if (q.length < 2) return Promise.resolve({ query: q, products: [], collections: [] });
+    if (q.length < 2) return Promise.resolve({ query: q, products: [], collections: [], source: 'none' });
     var query =
       'query PtSuggest($q: String!) {' +
-      ' predictiveSearch(query: $q, limit: 6, limitScope: EACH,' +
+      ' predictiveSearch(query: $q, limit: 8, limitScope: EACH,' +
       '  types: [PRODUCT, COLLECTION], unavailableProducts: LAST) {' +
       '  products {' + TILE_FIELDS + ' }' +
       '  collections { handle title }' +
       ' }' +
       '}';
+    function fallback() {
+      var pq = prefixQuery(q);
+      if (!pq) return { query: q, products: [], collections: [], source: 'none' };
+      return productsQuery(pq, SORTS.featured, {}, 'sugq|' + q.toLowerCase()).then(function (page) {
+        return { query: q, products: page.products.slice(0, 8), collections: [], source: 'catalogue' };
+      }).catch(function () { return { query: q, products: [], collections: [], source: 'none' }; });
+    }
     return gql(query, { q: q }, { cacheKey: 'sug|' + q.toLowerCase() }).then(function (data) {
       var ps = (data && data.predictiveSearch) || {};
-      return {
+      var r = {
         query: q,
         products: (ps.products || []).map(tileOf).filter(Boolean),
         collections: (ps.collections || []).map(function (c) {
           return { handle: String(c.handle || ''), title: String(c.title || '') };
-        }).filter(function (c) { return c.handle && c.title; })
+        }).filter(function (c) { return c.handle && c.title; }),
+        source: 'predictive'
       };
-    }).catch(function () { return { query: q, products: [], collections: [] }; });
+      if (!r.products.length) {
+        return fallback().then(function (f) {
+          f.collections = r.collections;
+          return f;
+        });
+      }
+      return r;
+    }).catch(fallback);
   }
 
-  /** The full result page for a search term. */
+  /** The full result page for a search term. The store's search first (it
+   *  understands plurals and typos); if it errors or finds nothing, a prefix
+   *  match over the whole catalogue. The page remembers which one answered,
+   *  so "show more" keeps paging the same list. */
   function searchAll(q, opts) {
     opts = opts || {};
     q = String(q || '').trim();
-    if (!q) return Promise.resolve({ products: [], hasMore: false, cursor: null, total: 0 });
+    if (!q) return Promise.resolve({ products: [], hasMore: false, cursor: null, total: 0, mode: 'search' });
     var sort = SORTS[opts.sort] || SORTS.featured;
+
+    function byCatalogue() {
+      var pq = prefixQuery(q);
+      if (!pq) return Promise.resolve({ products: [], hasMore: false, cursor: null, total: 0, mode: 'catalogue' });
+      return productsQuery(pq, sort, opts, 'searchq|' + q.toLowerCase()).then(function (page) {
+        page.total = page.hasMore ? null : page.products.length;
+        page.mode = 'catalogue';
+        return page;
+      });
+    }
+    if (opts.mode === 'catalogue') return byCatalogue();
+
     var query =
-      'query PtSearch($q: String!, $after: String) {' +
+      'query PtSearch($q: String!, $after: String, $sortKey: SearchSortKeys, $reverse: Boolean) {' +
       ' search(query: $q, first: ' + PAGE_SIZE + ', after: $after, types: [PRODUCT],' +
-      '  unavailableProducts: LAST) {' +
+      '  sortKey: $sortKey, reverse: $reverse, unavailableProducts: LAST) {' +
       '  totalCount' +
       '  pageInfo { hasNextPage endCursor }' +
       '  nodes { ... on Product {' + TILE_FIELDS + ' } }' +
       ' }' +
       '}';
-    var cacheKey = 'search|' + q.toLowerCase() + '|' + (opts.after || '');
-    return gql(query, { q: q, after: opts.after || null }, { cacheKey: cacheKey })
+    var searchSort = { featured: ['RELEVANCE', false], newest: ['RELEVANCE', false],
+      priceLow: ['PRICE', false], priceHigh: ['PRICE', true] }[opts.sort || 'featured'] || ['RELEVANCE', false];
+    var cacheKey = 'search|' + q.toLowerCase() + '|' + (opts.sort || 'featured') + '|' + (opts.after || '');
+    return gql(query, { q: q, after: opts.after || null, sortKey: searchSort[0], reverse: searchSort[1] },
+      { cacheKey: cacheKey })
       .then(function (data) {
         var page = pageOf(data && data.search);
-        page.total = (data && data.search && data.search.totalCount) || page.products.length;
+        page.total = (data && data.search && typeof data.search.totalCount === 'number')
+          ? data.search.totalCount : page.products.length;
+        page.mode = 'search';
+        if (!page.products.length && !opts.after) return byCatalogue();
         return page;
       })
       .catch(function (e) {
-        /* A store that does not expose search still has a catalogue: fall back
-         * to a product query, which every Shopify store answers. */
         if (opts.after) throw e;
-        return productsQuery(q, sort, opts, 'searchq|' + q.toLowerCase()).then(function (page) {
-          page.total = page.products.length;
-          return page;
-        });
+        return byCatalogue();
       });
   }
 
@@ -711,6 +813,8 @@
     sorts: SORTS,
     pageSize: PAGE_SIZE,
 
+    collections: collections,
+    allProducts: allProducts,
     collectionPage: collectionPage,
     brandPage: brandPage,
     product: product,
@@ -732,6 +836,7 @@
 
     sized: sized,
     shopUrl: shopUrl,
+    prefixQuery: prefixQuery,
 
     /* exposed for the tests */
     _tileOf: tileOf,

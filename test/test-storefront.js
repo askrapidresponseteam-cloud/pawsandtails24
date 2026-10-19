@@ -366,6 +366,101 @@ section('search');
   }));
 }
 
+section('live collections');
+{
+  const { S, f } = fresh((op, v) => {
+    if (op !== 'PtCollections') return {};
+    if (!v.after) return { collections: {
+      pageInfo: { hasNextPage: true, endCursor: 'p2' },
+      nodes: [
+        { id: 'c1', handle: 'dog-food', title: 'Dog Food', image: { url: 'https://cdn.shopify.com/x/d.jpg' }, products: { nodes: [{ id: 'p' }] } },
+        { id: 'c2', handle: 'retired', title: 'Retired', image: null, products: { nodes: [] } }
+      ] } };
+    return { collections: {
+      pageInfo: { hasNextPage: false, endCursor: null },
+      nodes: [{ id: 'c3', handle: 'cat-food', title: 'Cat Food', image: null, products: { nodes: [{ id: 'q' }] } }] } };
+  });
+  later(S.collections().then((cols) => {
+    eq('every page of collections is read', cols.map((c) => c.handle), ['dog-food', 'retired', 'cat-food']);
+    eq('a collection with products says so', cols[0].hasProducts, true);
+    eq('an empty collection says so, so menus can leave it out', cols[1].hasProducts, false);
+    eq('the store picture comes with it', cols[0].image, 'https://cdn.shopify.com/x/d.jpg');
+    eq('it took one call per page', f.calls.length, 2);
+  }));
+}
+
+section('shop all');
+{
+  const { S, f } = fresh(() => ({ products: { pageInfo: { hasNextPage: true, endCursor: 'n1' }, nodes: [TILE] } }));
+  later(S.allProducts({ sort: 'newest' }).then((page) => {
+    eq('the whole catalogue is one query, with no filter', f.calls[0].op, 'PtAll');
+    ok('it asks for no search term at all', !('q' in f.calls[0].variables));
+    eq('new in sorts by creation, newest first', [f.calls[0].variables.sortKey, f.calls[0].variables.reverse], ['CREATED_AT', true]);
+    eq('it pages', [page.hasMore, page.cursor], [true, 'n1']);
+    return S.allProducts({ after: 'n1' });
+  }).then(() => {
+    eq('the next page carries the cursor', f.calls[1].variables.after, 'n1');
+  }));
+}
+
+section('search that always finds what exists');
+{
+  const { S } = fresh();
+  eq('each word becomes a prefix', S.prefixQuery('Royal Canin'), 'royal* canin*');
+  eq('half a brand still finds it', S.prefixQuery('drool'), 'drool*');
+  eq('query syntax is taken out, not passed through', S.prefixQuery('a:b (c) "d"'), 'a* b* c* d*');
+  eq('nothing to search is nothing', S.prefixQuery('   '), '');
+}
+{
+  /* The store predicts nothing: the catalogue still answers. */
+  const { S, f } = fresh((op) => {
+    if (op === 'PtSuggest') return { predictiveSearch: { products: [], collections: [{ handle: 'dog-food', title: 'Dog Food' }] } };
+    if (op === 'PtProducts') return { products: { pageInfo: {}, nodes: [TILE] } };
+    return {};
+  });
+  later(S.suggest('drool').then((r) => {
+    eq('an empty prediction falls back to a catalogue match', r.source, 'catalogue');
+    eq('which finds the product', r.products.length, 1);
+    eq('the prefix query is what was asked', f.calls[1].variables.q, 'drool*');
+    eq('the store collections are kept alongside', r.collections[0].handle, 'dog-food');
+  }));
+}
+{
+  const { S } = fresh((op) => {
+    if (op === 'PtSuggest') return { errors: [{ message: 'predictive search is not enabled' }] };
+    if (op === 'PtProducts') return { products: { pageInfo: {}, nodes: [TILE] } };
+    return {};
+  });
+  later(S.suggest('royal').then((r) => {
+    eq('a store without prediction still suggests', r.products.length, 1);
+  }));
+}
+{
+  /* Store search finds nothing for a brand that is in the catalogue. */
+  const { S, f } = fresh((op) => {
+    if (op === 'PtSearch') return { search: { totalCount: 0, pageInfo: {}, nodes: [] } };
+    if (op === 'PtProducts') return { products: { pageInfo: { hasNextPage: true, endCursor: 'k1' }, nodes: [TILE] } };
+    return {};
+  });
+  later(S.searchAll('drools').then((page) => {
+    eq('zero from the store search falls back to the catalogue', page.products.length, 1);
+    eq('the page says which list answered', page.mode, 'catalogue');
+    eq('an unknown total is not invented', page.total, null);
+    return S.searchAll('drools', { after: page.cursor, mode: page.mode });
+  }).then(() => {
+    eq('show more keeps paging the same list', f.calls[f.calls.length - 1].op, 'PtProducts');
+    eq('with the cursor that list gave', f.calls[f.calls.length - 1].variables.after, 'k1');
+  }));
+}
+{
+  const { S, f } = fresh(() => ({ search: { totalCount: 5, pageInfo: {}, nodes: [TILE] } }));
+  later(S.searchAll('dog', { sort: 'priceHigh' }).then((page) => {
+    eq('a store search keeps its own count', page.total, 5);
+    eq('price high to low reaches the search sort', [f.calls[0].variables.sortKey, f.calls[0].variables.reverse], ['PRICE', true]);
+    eq('the page says the store search answered', page.mode, 'search');
+  }));
+}
+
 /* ====================================================================== BAG */
 
 section('the bag');
@@ -499,31 +594,18 @@ section('images');
 
 /* =============================================================== CATALOGUE */
 
-section('catalogue config');
+section('store facts');
 {
   const C = require(path.join(ROOT, 'assets', 'catalogue.js'));
-  const handles = [];
-  C.shelves.forEach((sh) => {
-    ok('shelf ' + sh.key + ' has a name', typeof sh.name === 'string' && sh.name.length > 0);
-    ok('shelf ' + sh.key + ' has aisles', Array.isArray(sh.aisles) && sh.aisles.length > 0);
-    sh.aisles.forEach((a) => {
-      ok('aisle ' + a.handle + ' is a handle, not a path', /^[a-z0-9-]+$/.test(a.handle));
-      ok('aisle ' + a.handle + ' has a label', typeof a.label === 'string' && a.label.length > 0);
-      handles.push(a.handle);
-    });
-  });
-  eq('no aisle is listed twice on the same shelf', handles.length, new Set(handles).size);
-  Object.keys(C.lanes).forEach((key) => {
-    C.lanes[key].aisles.forEach((a) => {
-      ok('lane ' + key + ' points at a real aisle: ' + a.handle, handles.indexOf(a.handle) >= 0);
-    });
-  });
-  C.nav.forEach((n) => ok('nav link ' + n.label + ' is a route', /^#\//.test(n.href)));
-  C.homeRails.forEach((r) => ok('home rail ' + r.handle + ' is a real aisle', handles.indexOf(r.handle) >= 0));
+  ok('there is no shelf list: collections come from the store', C.shelves === undefined);
+  ok('there are no lanes or home rails picked by hand', C.lanes === undefined && C.homeRails === undefined);
+  const text = fs.readFileSync(path.join(ROOT, 'assets', 'catalogue.js'), 'utf8');
+  ok('no collection handle is written into the shop', !/"handle"\s*:/.test(text));
   ok('the API version is dated', /^\d{4}-\d{2}$/.test(C.apiVersion));
   ok('the store domain is set', C.domain === 'pawsandtails24.com');
   ok('support details are present', !!(C.support.email && C.support.phone && C.support.whatsapp));
   ok('policy paths are present', !!(C.policies.refund && C.policies.shipping && C.policies.account));
+  ok('the system home collection is kept out of menus', C.hidden.indexOf('frontpage') >= 0);
 }
 
 /* ============================================================ HOUSE RULES */

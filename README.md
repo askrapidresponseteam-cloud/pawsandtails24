@@ -1,32 +1,57 @@
 # Paws and Tails storefront
 
-The storefront design, wired to the real shop. Every product, price, picture
-and stock line is read from the store's own Shopify Storefront API as the page
-loads, the bag is a Shopify cart held on Shopify's servers, and Checkout hands
-the buyer to the store's own checkout, which is what places the order.
+A reskin over the Paws and Tails Shopify store. Nothing about the catalogue is
+written into these files: the collections, every product, every price, picture
+and stock line are read from the store as the page loads. Whatever Shopify
+lists, this shop lists, and every one of those products can be put in the bag.
+The bag is a Shopify cart, and Checkout hands the buyer to the store's own
+checkout, which is what places the order.
 
-No product data is written into these files. Change a price in Shopify and the
-next visitor sees the new one.
+## Live
 
-## See it against the live store, now
+Deployed on Vercel at https://pawsandtails24.vercel.app. `vercel.json` forwards
+`/api/<version>/graphql.json` to the store, which is what lets the browser read
+it. The store answers without a key (tokenless access), so nothing else is
+needed.
+
+Check the deploy from a terminal at any time:
 
 ```
-node dev/serve.js
+node test/check-live.js
 ```
 
-Open http://localhost:4173. The terminal prints one line per call to the store,
-with its status, timing and size, so the catalogue arriving is something you
-can watch rather than take on trust.
+It reads the store through the deployed site and reports the store, its
+collections, the full catalogue, search, as-you-type and a product page. Read
+only, never a cart or an order.
 
-A laptop is not pawsandtails24.com, and the store's API answers its own origin
-only, so `dev/serve.js` forwards `/api/...` to the store and the browser sees
-one origin exactly as it will in production. Nothing else changes.
+## What the shopper gets
 
-**Checkout in dev is real.** The bag is a real Shopify cart and its checkout
-link points at the real store. Paying there is a real order with real money.
-Use a draft product, or stop at the checkout page.
+- **Shop all** pages through every product the store sells.
+- **Collections** come from the store's own list. A collection the shop adds,
+  renames or retires shows up, changes or goes here without any edit. Empty
+  collections and the system `frontpage` are left out of the menus.
+- **Search from every page.** The box in the header suggests products,
+  collections and brands as you type, marks the words matched, takes the arrow
+  keys and Enter, and `/` jumps to it. Enter on its own runs the full search.
+  On a phone the box becomes an icon that opens the search page.
+- **Search does not give up.** It asks the store's own search first (it knows
+  plurals and typos). If that is switched off, errors, or finds nothing, it
+  falls back to a prefix match over the whole catalogue, so half a brand name
+  or a word that only appears in the brand still finds the products. A slow
+  answer for an earlier keystroke can never overwrite a newer one.
+- **Every product page** has every size at its own price, its stock, and Add to
+  bag or Buy it now. Sold out stays visible, marked, and cannot be added.
 
-To browse with no store at all, invented products and a dead checkout:
+## See it against the live store on your machine
+
+```
+node dev/serve.js              then open http://localhost:4173
+```
+
+The terminal prints one line per call to the store. **Checkout here is real:**
+the bag is a real cart and paying is a real order.
+
+To browse with invented products and a dead checkout instead:
 
 ```
 node test/mock-store.js        then open http://localhost:4199
@@ -35,96 +60,54 @@ node test/mock-store.js        then open http://localhost:4199
 ## Tests
 
 ```
-node test/test-storefront.js   296 checks: money, transport, tiles, aisles,
-                               product, search, the bag, saved, house rules
-node test/test-ui.js           48 checks in a real browser against the mock
-                               store: catalogue arrives, sizes change the
-                               price, the bag holds what was added, checkout
-                               leaves for the store, phone layout, no console
-                               errors. Needs playwright (npm i -D playwright).
+node test/test-storefront.js   156 checks: money, transport, tiles, live
+                               collections, shop all, search and its
+                               fallbacks, product, the bag, saved, house rules
+node test/test-ui.js           62 checks in a real browser against the mock
+                               store: white page, menus from the store, every
+                               product reachable from shop all, header search
+                               (including its layout), a sample of products
+                               all added to one bag, checkout, phone layout,
+                               old links, no console errors
 ```
 
-Both are offline and deterministic. Neither can reach the live store or place
-an order. Run them after any change and before any deploy.
-
-## Putting it on pawsandtails24.com
-
-The site calls `/api/<version>/graphql.json`, a relative path. Served from the
-store's own domain that is the store's own API: no key, no proxy, no CORS, and
-nothing to configure. That is the only arrangement that is certain to work,
-because the store answers its own origin.
-
-So these files need to be served by whatever answers for pawsandtails24.com:
-
-1. **Inside the existing front end.** The store runs a custom (Hydrogen) front
-   end. Drop `index.html` and `assets/` into its static folder and give them a
-   route, for example `/shop`. Nothing in this code needs changing.
-2. **Behind a rewrite.** Host the files anywhere and put them under the domain
-   with a reverse proxy that also forwards `/api/...` to the store, the same
-   shape `dev/serve.js` uses.
-3. **On another domain, with a token.** Only if the shop issues a public
-   Storefront access token: set `window.PT_TOKEN` in `index.html` and
-   `window.PT_API_BASE` to `https://pawsandtails24.com`. Whether a browser is
-   allowed to call the API across origins depends on the shop's own setting, so
-   test it before committing to this route; if it is blocked, use 1 or 2.
+Both are offline. Run them after any change and before any push.
+`test-ui.js` needs playwright (`npm i -D playwright`).
 
 ## What is where
 
 ```
-index.html              the page. Holds no product data, only the two config
-                        lines and the script tags.
-assets/storefront.js    the client: transport, catalogue, product, search and
-                        the Shopify cart. Browser and node, so it is testable.
-assets/app.js           routing, views and events. Reads the client, nothing else.
-assets/catalogue.js     shelves, aisles, lanes, brands, support and policy
-                        paths. Every collection handle is one the live store
-                        answers for.
-assets/styles.css       the design: cream ground, plum brand, terracotta accent.
-assets/fonts.css        Newsreader, DM Sans and DM Mono, served from this folder
-assets/fonts/           so no third party is asked for them.
-assets/img/             the three photographs.
-dev/serve.js            local server, forwards /api to the live store.
-test/mock-store.js      a stand-in store: same operations, invented products.
-test/test-storefront.js the client, against a fake fetch.
-test/test-ui.js         the interface, in a real browser.
+index.html              the page shell: config lines and script tags only
+vercel.json             forwards /api to the store
+assets/storefront.js    the client: transport, collections, catalogue, product,
+                        search with fallbacks, the Shopify cart
+assets/app.js           routing, views, the header search
+assets/catalogue.js     store facts only: domain, API version, support,
+                        policy pages, a starting brand list, hidden collections
+assets/styles.css       the design on a white ground
+assets/fonts.css, fonts/  the three typefaces, served from here
+assets/img/             the three photographs
+dev/serve.js            local server, forwards /api to the live store
+test/check-live.js      the live check against a deployed site
+test/mock-store.js      a stand-in store for the tests
+test/test-storefront.js the client, against a fake fetch
+test/test-ui.js         the interface, in a real browser
 ```
-
-## Adding an aisle or a shelf
-
-Everything the shop lists comes from `assets/catalogue.js`. An aisle is the
-collection handle the store uses, with the label to show:
-
-```js
-{ "label": "Dental", "handle": "dental-care" }
-```
-
-The tests check that every lane and every home rail points at an aisle that
-exists, so a typo fails the suite rather than the shop.
 
 ## Decisions worth knowing
 
-- **Sold out stays on the shelf**, marked, and cannot be added. Shopify would
-  refuse the line anyway, and hiding it hides that the store stocks the thing.
-- **A product whose sizes differ in price shows "from" and no saving.** The
-  lowest price and the highest MRP belong to different sizes, so a percentage
-  across them would overstate every size. The saving appears on the product
-  page, once a size is chosen.
-- **The bag lives at Shopify, not here.** Only the cart id is kept on the
-  device, so a bag opened on a laptop and paid on a phone cannot disagree, and
-  stock is checked by the store on every change.
-- **Prices are handled as paise in whole numbers**, parsed from the API's text,
-  so no rupee passes through a float.
-- **Storage can fail.** Private windows and blocked site data throw; every read
-  and write is wrapped and the shop works without them.
-- **A refused field retries without it.** If the shop's setup keeps `tags`
-  behind a token, the product read drops the field and remembers, rather than
-  failing.
+- **A product whose sizes differ in price shows "from" and no saving** on its
+  tile. The lowest price and the highest MRP belong to different sizes; the
+  real saving shows on the product page once a size is chosen.
+- **The bag lives at Shopify.** Only the cart id is on the device, so stock is
+  checked by the store on every change and a bag opened on one device can be
+  paid on another.
+- **Paise are whole numbers** parsed from the API's text; no rupee passes
+  through a float.
+- **Storage can fail** in private windows; every read and write is wrapped.
 
 ## Known limits
 
-- **Search engines see one page.** Routes live in the hash, so crawlers get the
-  shell. Fine behind an existing front end that already serves product pages;
-  worth knowing if this becomes the whole site.
-- **No customer accounts here.** Sign in, orders and addresses are Shopify's;
-  the header links to the store's account page.
-- **Delivery is priced at checkout**, by the store, not quoted in the bag.
+- **Search engines see one page.** Routes live in the hash.
+- **Accounts are Shopify's.** The header links to the store's account page.
+- **Delivery is priced at checkout**, by the store.
