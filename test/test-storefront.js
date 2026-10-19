@@ -77,7 +77,7 @@ function fresh(handler, opts) {
   const S = require(CLIENT);
   const f = fakeFetch(handler || (() => ({})));
   S.configure(Object.assign({
-    apiBase: '', version: '2026-01', token: '', fetchImpl: f, storage: memStorage()
+    apiBase: '', version: '2026-01', token: '', fetchImpl: f, storage: memStorage(), quiet: true
   }, opts || {}));
   S.clearCache();
   return { S, f };
@@ -322,6 +322,35 @@ section('product');
     ok('a refused field is retried without it rather than failing', p !== null);
     eq('the retry is the second and last call', f.calls.length, 2);
     ok('the retry asks for no tags', !/\btags\b/.test(f.calls[1].query));
+  }));
+}
+
+{
+  /* Once the store has refused the rich read, it is not asked again. */
+  const { S, f } = fresh((op, v, body) => {
+    if (/quantityAvailable|\btags\b/.test(body.query)) return { errors: [{ message: 'Access denied for quantityAvailable field.' }] };
+    return { product: { id: 'gid://x/1', handle: v.handle, title: 'T', variants: { nodes: [
+      { id: 'gid://x/v1', title: '1 kg', availableForSale: true, price: { amount: '100.00' } }] }, images: { nodes: [] }, options: [] } };
+  }, { quiet: true });
+  later(S.product('a').then((p) => {
+    ok('a refused stock count still gives a product page', p && p.variants.length === 1);
+    eq('it took the rich read and one retry', f.calls.length, 2);
+    ok('without stock counts, the variant is still buyable', p.variants[0].available === true);
+    eq('and its stock is unknown rather than zero', p.variants[0].stock, null);
+    return S.product('b');
+  }).then(() => {
+    eq('the next product goes straight to the read the store allows', f.calls.length, 3);
+    ok('which asks for nothing tokenless access refuses', !/quantityAvailable|\btags\b/.test(f.calls[2].query));
+  }));
+}
+
+{
+  /* The bag must never ask for something the store can refuse: a refused
+   * field there would mean nothing could be bought. */
+  const { S, f } = fresh((op) => (op === 'PtCartCreate' ? { cartCreate: { cart: CART, userErrors: [] } } : {}));
+  later(S.cartAdd('gid://shopify/ProductVariant/11', 1).then(() => {
+    ok('the bag asks for no stock counts', !/quantityAvailable/.test(f.calls[0].query));
+    ok('the bag asks for no tags', !/\btags\b/.test(f.calls[0].query));
   }));
 }
 

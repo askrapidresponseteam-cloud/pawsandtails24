@@ -153,6 +153,11 @@
       if (Array.isArray(body.errors) && body.errors.length) {
         var err = StorefrontError('The store could not load this right now.');
         err.graphQLErrors = body.errors;
+        try {
+          if (typeof console !== 'undefined' && !config.quiet) {
+            console.warn('[storefront] ' + body.errors.map(function (x) { return x && x.message; }).join(' | '));
+          }
+        } catch (w) { /* no console */ }
         err.fieldRefused = refusedField(body.errors);
         throw err;
       }
@@ -221,7 +226,7 @@
 
   var TILE_FIELDS =
     ' id handle title vendor productType availableForSale' +
-    ' featuredImage { url altText }' +
+    ' featuredImage { url }' +
     ' priceRange { minVariantPrice { amount currencyCode } maxVariantPrice { amount } }' +
     ' compareAtPriceRange { maxVariantPrice { amount } }';
 
@@ -256,7 +261,7 @@
       type: String(node.productType || '').trim(),
       available: node.availableForSale !== false,
       image: (node.featuredImage && node.featuredImage.url) || null,
-      imageAlt: (node.featuredImage && node.featuredImage.altText) || String(node.title || ''),
+      imageAlt: String(node.title || ''),
       paise: from,
       paiseMax: to,
       /* Shopify reports a compareAt of 0 or below the price when nothing is on
@@ -401,19 +406,26 @@
 
   /* ================================================================ PRODUCT */
 
-  function productQuery(lean) {
+  /* Two shapes. BASE asks only for fields this store is known to answer
+   * without a key: the same set the RRT app reads from it in production.
+   * RICH adds tags and stock counts, which tokenless access can refuse
+   * ("access denied", needs an inventory scope). The page asks RICH once;
+   * any GraphQL error drops to BASE for the rest of the visit, so a refused
+   * field costs one extra call, never a broken page. */
+  function productQuery(rich) {
     return 'query PtProduct($handle: String!) {' +
       ' product(handle: $handle) {' +
-      '  id handle title vendor productType descriptionHtml availableForSale' +
-      (lean ? '' : ' tags') +
-      '  featuredImage { url altText }' +
-      '  images(first: 12) { nodes { url altText } }' +
-      '  options { name values }' +
+      '  id handle title vendor productType descriptionHtml' +
+      (rich ? ' tags' : '') +
+      '  featuredImage { url }' +
+      '  images(first: 12) { nodes { url } }' +
+      '  options { name }' +
       '  variants(first: 100) { nodes {' +
-      '   id title availableForSale quantityAvailable currentlyNotInStock' +
-      '   price { amount currencyCode } compareAtPrice { amount }' +
+      '   id title availableForSale' +
+      '   price { amount } compareAtPrice { amount }' +
       '   image { url }' +
       '   selectedOptions { name value }' +
+      (rich ? '   quantityAvailable currentlyNotInStock' : '') +
       '  } }' +
       ' }' +
       '}';
@@ -438,16 +450,16 @@
     };
   }
 
-  var leanProduct = false;
+  var richProduct = true;
 
   function product(handle, opts) {
     opts = opts || {};
-    var cacheKey = 'prod|' + handle + (leanProduct ? '|l' : '');
-    return gql(productQuery(leanProduct), { handle: handle }, { cacheKey: cacheKey, fresh: opts.fresh })
+    var rich = richProduct;
+    return gql(productQuery(rich), { handle: handle }, { cacheKey: 'prod|' + handle + (rich ? '|r' : '|b'), fresh: opts.fresh })
       .catch(function (e) {
-        if (!leanProduct && e && e.fieldRefused) {
-          leanProduct = true;
-          return gql(productQuery(true), { handle: handle }, { cacheKey: 'prod|' + handle + '|l', fresh: opts.fresh });
+        if (rich && e && e.graphQLErrors) {
+          richProduct = false;
+          return gql(productQuery(false), { handle: handle }, { cacheKey: 'prod|' + handle + '|b', fresh: opts.fresh });
         }
         throw e;
       })
@@ -456,10 +468,10 @@
         if (!p) return null;
         var variants = ((p.variants && p.variants.nodes) || []).map(variantOf).filter(Boolean);
         var images = ((p.images && p.images.nodes) || []).map(function (i) {
-          return { url: i.url, alt: i.altText || String(p.title || '') };
+          return { url: i.url, alt: String(p.title || '') };
         });
         if (!images.length && p.featuredImage) {
-          images = [{ url: p.featuredImage.url, alt: p.featuredImage.altText || String(p.title || '') }];
+          images = [{ url: p.featuredImage.url, alt: String(p.title || '') }];
         }
         return {
           id: p.id,
@@ -469,7 +481,7 @@
           type: String(p.productType || '').trim(),
           descriptionHtml: String(p.descriptionHtml || ''),
           tags: (p.tags || []).map(String),
-          available: p.availableForSale !== false,
+          available: variants.some(function (v) { return v.available; }),
           images: images,
           optionNames: ((p.options || []).map(function (o) { return String(o.name || ''); })
             .filter(function (n) { return n && n.toLowerCase() !== 'title'; })),
@@ -606,7 +618,7 @@
     '  id quantity' +
     '  cost { totalAmount { amount } }' +
     '  merchandise { ... on ProductVariant {' +
-    '   id title availableForSale quantityAvailable' +
+    '   id title availableForSale' +
     '   price { amount } compareAtPrice { amount }' +
     '   image { url }' +
     '   product { handle title vendor featuredImage { url } }' +

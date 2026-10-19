@@ -20,6 +20,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const args = process.argv.slice(2);
+const STRICT_OFF = process.argv.indexOf('--permissive') >= 0;
 const PORT = Number((args.indexOf('--port') >= 0 && args[args.indexOf('--port') + 1]) || 4199);
 
 const C = require(path.join(ROOT, 'assets', 'catalogue.js'));
@@ -382,6 +383,18 @@ const server = http.createServer((req, res) => {
       let body = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { /* ignore */ }
       const m = String(body.query || '').match(/(?:query|mutation)\s+(\w+)/);
+      /* Tokenless access, as the live store has it: no stock counts, no tags.
+       * Asking for either fails the whole request, exactly as Shopify does. */
+      const refused = String(body.query || '').match(/\b(quantityAvailable|tags)\b/);
+      if (refused && !STRICT_OFF) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ errors: [{
+          message: 'Access denied for ' + refused[1] + ' field. Required access: `unauthenticated_read_product_' +
+            (refused[1] === 'tags' ? 'tags' : 'inventory') + '` access scope.',
+          extensions: { code: 'ACCESS_DENIED' }
+        }] }));
+        return;
+      }
       const out = resolve(m ? m[1] : '', body.variables || {}, body.query);
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(out.errors ? out : { data: out }));

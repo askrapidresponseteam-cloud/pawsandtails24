@@ -665,7 +665,9 @@
           '<div class="rail">' + tiles(recs.slice(0, 10)) + '</div></section>';
       });
     }).catch(function (e) {
-      app.innerHTML = '<div class="wrap" style="padding-top:40px">' + errorBlock(e) + '</div>';
+      app.innerHTML = '<div class="wrap" style="padding-top:40px">' + errorBlock(e) +
+        '<p style="padding-top:14px;font-size:14px;color:var(--mute)">Or open <a href="' +
+        esc(S.shopUrl('/products/' + handle)) + '">this product on ' + esc(C.domain) + '</a>.</p></div>';
     });
   }
 

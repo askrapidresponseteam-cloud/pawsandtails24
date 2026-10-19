@@ -20,9 +20,16 @@ Check the deploy from a terminal at any time:
 node test/check-live.js
 ```
 
-It reads the store through the deployed site and reports the store, its
-collections, the full catalogue, search, as-you-type and a product page. Read
-only, never a cart or an order.
+It runs the shop's own code (assets/storefront.js) against the live store
+through the deployed site: collections, shop all, search, as-you-type, a
+product page, then one product into a new cart and its checkout link. That
+cart is real but no order is placed; Shopify drops it after ten days.
+
+The store is read without a key, and tokenless access refuses stock counts
+and tags. The bag never asks for either. The product page tries once and
+falls back to the fields the store allows, so a refusal costs one extra
+call, never a broken page. The mock store refuses them too, so the tests
+run under the same rule as production.
 
 ## What the shopper gets
 
@@ -60,9 +67,10 @@ node test/mock-store.js        then open http://localhost:4199
 ## Tests
 
 ```
-node test/test-storefront.js   156 checks: money, transport, tiles, live
+node test/test-storefront.js   164 checks: money, transport, tiles, live
                                collections, shop all, search and its
-                               fallbacks, product, the bag, saved, house rules
+                               fallbacks, tokenless-safe product and bag, saved,
+                               house rules
 node test/test-ui.js           62 checks in a real browser against the mock
                                store: white page, menus from the store, every
                                product reachable from shop all, header search
