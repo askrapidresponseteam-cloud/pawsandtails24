@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {
+      "source": "/api/:version(\\d{4}-\\d{2})/graphql.json",
+      "destination": "https://pawsandtails24.com/api/:version/graphql.json"
+    }
+  ]
+}
