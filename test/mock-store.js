@@ -1,0 +1,327 @@
+#!/usr/bin/env node
+/* ============================================================================
+ * A stand-in for the store, for tests and for looking at the site offline
+ * ============================================================================
+ * Answers the same Storefront API operations the real store answers, with
+ * invented products, and serves the site next to them so the browser sees one
+ * origin. The cart is real state: adding, changing and removing behave as
+ * Shopify behaves, including refusing more than is in stock.
+ *
+ *   node test/mock-store.js --port 4199
+ *
+ * Nothing here ever reaches pawsandtails24.com, and no order can be placed:
+ * its checkoutUrl is a dead local address on purpose.
+ * ========================================================================== */
+'use strict';
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+
+const ROOT = path.resolve(__dirname, '..');
+const args = process.argv.slice(2);
+const PORT = Number((args.indexOf('--port') >= 0 && args[args.indexOf('--port') + 1]) || 4199);
+
+const C = require(path.join(ROOT, 'assets', 'catalogue.js'));
+
+/* The port actually listened on, so a cart checkout link points at this
+ * server even when a test picks its own port. */
+let activePort = PORT;
+
+/* ------------------------------------------------------------- the pretend stock */
+
+const BRANDS = C.brands;
+const products = [];
+C.shelves.forEach((shelf, si) => {
+  shelf.aisles.forEach((aisle, ai) => {
+    const n = 3 + ((si + ai) % 3);
+    for (let k = 0; k < n; k++) {
+      const idx = products.length + 1;
+      const brand = BRANDS[idx % BRANDS.length];
+      const base = 180 + ((idx * 137) % 9000);
+      const soldOut = idx % 17 === 0;
+      const onOffer = idx % 3 === 0;
+      const sizes = idx % 4 === 0 ? ['250 g'] : ['250 g', '1 kg', '4 kg'];
+      products.push({
+        id: 'gid://shopify/Product/' + idx,
+        handle: aisle.handle + '-item-' + (k + 1),
+        title: aisle.label + ' ' + (k === 0 ? 'everyday' : k === 1 ? 'premium' : 'value') + ' pack',
+        vendor: brand,
+        productType: shelf.name,
+        availableForSale: !soldOut,
+        tags: ['Veg'],
+        descriptionHtml: '<p>Invented copy for the mock store. ' + aisle.label +
+          ' from ' + brand + '.</p><ul><li>Not a real product</li><li>Prices are made up</li></ul>',
+        aisles: [aisle.handle],
+        variants: sizes.map((size, vi) => ({
+          id: 'gid://shopify/ProductVariant/' + idx + '0' + vi,
+          title: sizes.length === 1 ? 'Default Title' : size,
+          availableForSale: !soldOut && !(idx % 11 === 0 && vi === sizes.length - 1),
+          quantityAvailable: soldOut ? 0 : (idx % 7 === 0 ? 3 : 25),
+          currentlyNotInStock: false,
+          price: { amount: (base * (vi + 1)).toFixed(2), currencyCode: 'INR' },
+          compareAtPrice: onOffer ? { amount: (base * (vi + 1) * 1.18).toFixed(2) } : null,
+          image: null,
+          selectedOptions: [{ name: sizes.length === 1 ? 'Title' : 'Size', value: size }]
+        }))
+      });
+    }
+  });
+});
+
+function tile(p) {
+  const prices = p.variants.map((v) => Number(v.price.amount));
+  const was = p.variants.map((v) => (v.compareAtPrice ? Number(v.compareAtPrice.amount) : 0));
+  return {
+    id: p.id, handle: p.handle, title: p.title, vendor: p.vendor, productType: p.productType,
+    availableForSale: p.availableForSale,
+    featuredImage: null,
+    priceRange: {
+      minVariantPrice: { amount: Math.min.apply(null, prices).toFixed(2), currencyCode: 'INR' },
+      maxVariantPrice: { amount: Math.max.apply(null, prices).toFixed(2) }
+    },
+    compareAtPriceRange: { maxVariantPrice: { amount: Math.max.apply(null, was).toFixed(2) } }
+  };
+}
+
+function full(p) {
+  return {
+    id: p.id, handle: p.handle, title: p.title, vendor: p.vendor, productType: p.productType,
+    descriptionHtml: p.descriptionHtml, availableForSale: p.availableForSale, tags: p.tags,
+    featuredImage: null, images: { nodes: [] },
+    options: [{ name: p.variants.length > 1 ? 'Size' : 'Title', values: p.variants.map((v) => v.title) }],
+    variants: { nodes: p.variants }
+  };
+}
+
+function byHandle(handle) {
+  for (const p of products) if (p.handle === handle) return p;
+  return null;
+}
+function variantById(id) {
+  for (const p of products) for (const v of p.variants) if (v.id === id) return { product: p, variant: v };
+  return null;
+}
+function inAisle(handle) { return products.filter((p) => p.aisles.indexOf(handle) >= 0); }
+
+/* -------------------------------------------------------------------- carts */
+
+const carts = new Map();
+let cartSeq = 0;
+
+function cartJson(cart) {
+  let subtotal = 0;
+  const nodes = cart.lines.map((l) => {
+    const hit = variantById(l.variantId);
+    const unit = Number(hit.variant.price.amount);
+    subtotal += unit * l.qty;
+    return {
+      id: l.id, quantity: l.qty,
+      cost: { totalAmount: { amount: (unit * l.qty).toFixed(2) } },
+      merchandise: {
+        id: hit.variant.id, title: hit.variant.title,
+        availableForSale: hit.variant.availableForSale,
+        quantityAvailable: hit.variant.quantityAvailable,
+        price: hit.variant.price, compareAtPrice: hit.variant.compareAtPrice,
+        image: null,
+        product: { handle: hit.product.handle, title: hit.product.title, vendor: hit.product.vendor, featuredImage: null }
+      }
+    };
+  });
+  return {
+    id: cart.id,
+    checkoutUrl: 'http://localhost:' + activePort + '/mock-checkout/' + cart.id.split('/').pop(),
+    totalQuantity: cart.lines.reduce((s, l) => s + l.qty, 0),
+    cost: { subtotalAmount: { amount: subtotal.toFixed(2), currencyCode: 'INR' }, totalAmount: { amount: subtotal.toFixed(2) } },
+    lines: { nodes: nodes }
+  };
+}
+
+function addLines(cart, lines) {
+  for (const line of lines) {
+    const hit = variantById(line.merchandiseId);
+    if (!hit) return 'That product is no longer available.';
+    if (!hit.variant.availableForSale) return 'That size is sold out.';
+    if (line.quantity > hit.variant.quantityAvailable) {
+      return 'Only ' + hit.variant.quantityAvailable + ' of that are available.';
+    }
+    const existing = cart.lines.find((l) => l.variantId === line.merchandiseId);
+    if (existing) existing.qty += line.quantity;
+    else cart.lines.push({ id: 'gid://shopify/CartLine/' + (++cartSeq), variantId: line.merchandiseId, qty: line.quantity });
+  }
+  return null;
+}
+
+/* ----------------------------------------------------------------- resolver */
+
+function resolve(op, v) {
+  if (op === 'PtPing') return { shop: { name: 'Paws and Tails (mock)', primaryDomain: { host: 'localhost' } } };
+
+  if (op === 'PtCollection') {
+    const list = inAisle(v.handle);
+    if (!list.length && !C.shelves.some((s) => s.aisles.some((a) => a.handle === v.handle))) return { collection: null };
+    const start = v.after ? Number(v.after) : 0;
+    const slice = list.slice(start, start + 24);
+    const label = (function () {
+      for (const s of C.shelves) for (const a of s.aisles) if (a.handle === v.handle) return a.label;
+      return v.handle;
+    }());
+    return { collection: {
+      title: label, description: 'Mock aisle: ' + label,
+      products: {
+        pageInfo: { hasNextPage: start + 24 < list.length, endCursor: String(start + 24) },
+        nodes: slice.map(tile)
+      }
+    } };
+  }
+
+  if (op === 'PtProducts') {
+    const term = String(v.q || '').toLowerCase();
+    const brand = term.match(/^vendor:'(.*)'$/);
+    const handles = String(v.q || '').match(/handle:"[^"]+"/g);
+    let list;
+    if (handles) {
+      /* Shopify answers handle:"a" OR handle:"b" from the products query,
+       * which is how the saved list is read back. */
+      const wanted = handles.map((h) => h.slice(8, -1));
+      list = products.filter((p) => wanted.indexOf(p.handle) >= 0);
+    } else if (brand) {
+      const name = brand[1].replace(/\\'/g, "'").toLowerCase();
+      list = products.filter((p) => p.vendor.toLowerCase() === name);
+    } else {
+      list = products.filter((p) => (p.title + ' ' + p.vendor).toLowerCase().indexOf(term) >= 0);
+    }
+    const start = v.after ? Number(v.after) : 0;
+    return { products: {
+      pageInfo: { hasNextPage: start + 24 < list.length, endCursor: String(start + 24) },
+      nodes: list.slice(start, start + 24).map(tile)
+    } };
+  }
+
+  if (op === 'PtProduct') {
+    const p = byHandle(v.handle);
+    return { product: p ? full(p) : null };
+  }
+
+  if (op === 'PtRecommend') {
+    return { productRecommendations: products.slice(4, 10).map(tile) };
+  }
+
+  if (op === 'PtSuggest') {
+    const term = String(v.q || '').toLowerCase();
+    return { predictiveSearch: {
+      products: products.filter((p) => p.title.toLowerCase().indexOf(term) >= 0).slice(0, 6).map(tile),
+      collections: C.shelves[0].aisles.slice(0, 2).map((a) => ({ handle: a.handle, title: a.label }))
+    } };
+  }
+
+  if (op === 'PtSearch') {
+    const term = String(v.q || '').toLowerCase();
+    const list = products.filter((p) => (p.title + ' ' + p.vendor).toLowerCase().indexOf(term) >= 0);
+    const start = v.after ? Number(v.after) : 0;
+    return { search: {
+      totalCount: list.length,
+      pageInfo: { hasNextPage: start + 24 < list.length, endCursor: String(start + 24) },
+      nodes: list.slice(start, start + 24).map(tile)
+    } };
+  }
+
+  if (op === 'PtCartCreate') {
+    const cart = { id: 'gid://shopify/Cart/mock' + (++cartSeq), lines: [] };
+    const err = addLines(cart, (v.input && v.input.lines) || []);
+    if (err) return { cartCreate: { cart: null, userErrors: [{ message: err, field: null }] } };
+    carts.set(cart.id, cart);
+    return { cartCreate: { cart: cartJson(cart), userErrors: [] } };
+  }
+
+  if (op === 'PtCartAdd') {
+    const cart = carts.get(v.id);
+    if (!cart) return { cartLinesAdd: { cart: null, userErrors: [] } };
+    const err = addLines(cart, v.lines || []);
+    if (err) return { cartLinesAdd: { cart: null, userErrors: [{ message: err, field: null }] } };
+    return { cartLinesAdd: { cart: cartJson(cart), userErrors: [] } };
+  }
+
+  if (op === 'PtCart') {
+    const cart = carts.get(v.id);
+    return { cart: cart ? cartJson(cart) : null };
+  }
+
+  if (op === 'PtCartUpdate') {
+    const cart = carts.get(v.id);
+    if (!cart) return { cartLinesUpdate: { cart: null, userErrors: [] } };
+    (v.lines || []).forEach((u) => {
+      const line = cart.lines.find((l) => l.id === u.id);
+      if (line) line.qty = u.quantity;
+    });
+    return { cartLinesUpdate: { cart: cartJson(cart), userErrors: [] } };
+  }
+
+  if (op === 'PtCartRemove') {
+    const cart = carts.get(v.id);
+    if (!cart) return { cartLinesRemove: { cart: null, userErrors: [] } };
+    cart.lines = cart.lines.filter((l) => (v.lineIds || []).indexOf(l.id) < 0);
+    return { cartLinesRemove: { cart: cartJson(cart), userErrors: [] } };
+  }
+
+  return { errors: [{ message: 'mock store does not know the operation ' + op }] };
+}
+
+/* ------------------------------------------------------------------- server */
+
+const TYPES = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.json': 'application/json; charset=utf-8', '.md': 'text/plain; charset=utf-8',
+  '.woff2': 'font/woff2'
+};
+
+const server = http.createServer((req, res) => {
+  const url = String(req.url || '/').split('?')[0];
+
+  if (url.startsWith('/api/')) {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let body = {};
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { /* ignore */ }
+      const m = String(body.query || '').match(/(?:query|mutation)\s+(\w+)/);
+      const out = resolve(m ? m[1] : '', body.variables || {});
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify(out.errors ? out : { data: out }));
+    });
+    return;
+  }
+
+  if (url.startsWith('/mock-checkout/')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<!doctype html><title>Mock checkout</title><body style="font-family:system-ui;padding:40px">' +
+      '<h1>This is where the real store checkout would open</h1>' +
+      '<p>Cart ' + url.split('/').pop() + '. No order is placed by the mock store.</p>');
+    return;
+  }
+
+  const target = url === '/' ? '/index.html' : url;
+  const file = path.join(ROOT, target.replace(/^\/+/, ''));
+  if (!file.startsWith(ROOT) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    const home = fs.readFileSync(path.join(ROOT, 'index.html'));
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(home);
+    return;
+  }
+  res.writeHead(200, { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream' });
+  res.end(fs.readFileSync(file));
+});
+
+server.on('listening', () => { activePort = server.address().port; });
+
+if (require.main === module) {
+  server.listen(PORT, () => {
+    process.stdout.write('\n  mock store on http://localhost:' + activePort + '\n' +
+      '  ' + products.length + ' invented products across ' +
+      C.shelves.reduce((n, s) => n + s.aisles.length, 0) + ' aisles\n' +
+      '  nothing here touches the live store\n\n');
+  });
+}
+
+module.exports = { server, products, PORT };

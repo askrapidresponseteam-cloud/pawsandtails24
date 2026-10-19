@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paws and Tails, pet food, pharmacy and care</title>
+<meta name="description" content="Food, medicine, supplements and everyday care for dogs, cats, birds and small pets. Prices and stock read live from our store.">
+<meta name="theme-color" content="#2d1b3a">
+<link rel="preconnect" href="https://cdn.shopify.com" crossorigin>
+<link rel="preload" href="assets/fonts/newsreader-latin-68ef9a14.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/dm-sans-latin-aa530716.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/fonts.css">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+
+<div id="chrome"></div>
+<main id="app" style="min-height:52vh"></main>
+<div id="foot"></div>
+<div id="drawer"></div>
+
+<noscript>
+  <div style="max-width:620px;margin:60px auto;padding:0 20px;font-family:Georgia,serif">
+    <h1 style="font-weight:400;font-size:34px">Paws and Tails</h1>
+    <p style="font-family:system-ui,sans-serif;font-size:15px;line-height:1.6;color:#5a4f46">
+      This shop reads its catalogue and prices from our store as the page loads, which needs
+      JavaScript switched on. You can also call us on 033-3597-8875 or write to
+      contact@pawsandtails24.com and we will take the order.
+    </p>
+  </div>
+</noscript>
+
+<!--
+  Where the data comes from
+  -------------------------
+  Served from pawsandtails24.com, the two scripts below read the store's own
+  Storefront API at the relative path /api/<version>/graphql.json. Same origin,
+  so no key, no proxy and no CORS. Served from anywhere else, set PT_API_BASE to
+  something that forwards that path (dev/serve.js does it for local work).
+-->
+<script>
+  /* Left empty on the live domain. The dev server sets it to its own origin. */
+  window.PT_API_BASE = '';
+  /* Only needed if the store asks for a public Storefront token. */
+  window.PT_TOKEN = '';
+</script>
+<script src="assets/catalogue.js"></script>
+<script src="assets/storefront.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

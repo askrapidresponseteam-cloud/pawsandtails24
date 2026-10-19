@@ -1,0 +1,13 @@
+{
+  "name": "pawsandtails-storefront",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paws and Tails storefront: live Shopify catalogue, live prices, real checkout",
+  "scripts": {
+    "dev": "node dev/serve.js",
+    "mock": "node test/mock-store.js",
+    "test": "node test/test-storefront.js",
+    "test:ui": "node test/test-ui.js"
+  },
+  "engines": { "node": ">=18" }
+}
