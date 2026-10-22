@@ -228,7 +228,8 @@
     ' id handle title vendor productType availableForSale' +
     ' featuredImage { url }' +
     ' priceRange { minVariantPrice { amount currencyCode } maxVariantPrice { amount } }' +
-    ' compareAtPriceRange { maxVariantPrice { amount } }';
+    ' compareAtPriceRange { maxVariantPrice { amount } }' +
+    ' variants(first: 2) { nodes { id availableForSale } }';
 
   var SORTS = {
     featured: { key: 'BEST_SELLING', reverse: false, label: 'Featured' },
@@ -272,8 +273,18 @@
        * like that shows "from" and no saving; the real one is on the product
        * page, where a size has been chosen. */
       wasPaise: !ranged && wasP && from && wasP > from ? wasP : null,
-      ranged: ranged
+      ranged: ranged,
+      /* One size only: it can go straight in the bag from a listing. More
+       * than one: the shopper picks the size on the product page. */
+      quickVariant: oneVariant(node),
+      sizes: node.variants && node.variants.nodes ? node.variants.nodes.length : null
     };
+  }
+
+  function oneVariant(node) {
+    var vs = node.variants && node.variants.nodes;
+    if (!vs || vs.length !== 1 || !vs[0] || !vs[0].id) return null;
+    return vs[0].availableForSale === false || node.availableForSale === false ? null : vs[0].id;
   }
 
   function discountPercent(tile) {
@@ -795,6 +806,76 @@
       .catch(function () { return []; });
   }
 
+  /* =============================================================== POLICIES
+   * The store's own shipping and returns wording. Delivery estimates and the
+   * assistant's answers about charges, cash on delivery and returns are read
+   * from this text, so they change when the shop edits its pages. Both the
+   * shop's policy settings and its pages are asked for; the page wins when
+   * both exist, because that is the one the footer links to. */
+
+  function plainText(html) {
+    return String(html || '')
+      .replace(/<(br|\/p|\/li|\/h\d|\/div)[^>]*>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&#8377;|&#x20b9;/gi, '\u20b9')
+      .replace(/&rsquo;|&#39;/g, "'").replace(/&quot;/g, '"').replace(/&[a-z]+;/gi, ' ')
+      .replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+  }
+
+  function handleOf(path) { return String(path || '').split('/').filter(Boolean).pop() || ''; }
+
+  function policies(opts) {
+    opts = opts || {};
+    var query =
+      'query PtPolicies($ship: String!, $refund: String!) {' +
+      ' shop { shippingPolicy { body url } refundPolicy { body url } }' +
+      ' ship: page(handle: $ship) { body }' +
+      ' refund: page(handle: $refund) { body }' +
+      '}';
+    var shipPath = opts.shippingPath || '/pages/shipping';
+    var refundPath = opts.refundPath || '/pages/returns';
+    return gql(query, { ship: handleOf(shipPath), refund: handleOf(refundPath) }, { cacheKey: 'policies' })
+      .then(function (d) {
+        d = d || {};
+        var shop = d.shop || {};
+        function pick(page, pol, path) {
+          var text = plainText(page && page.body) || plainText(pol && pol.body);
+          return { text: text, url: page && page.body ? shopUrl(path) : ((pol && pol.url) || shopUrl(path)) };
+        }
+        return {
+          shipping: pick(d.ship, shop.shippingPolicy, shipPath),
+          refund: pick(d.refund, shop.refundPolicy, refundPath)
+        };
+      })
+      .catch(function () {
+        return { shipping: { text: '', url: shopUrl(shipPath) }, refund: { text: '', url: shopUrl(refundPath) } };
+      });
+  }
+
+  /* ================================================================= ORDERS
+   * Order lookups go to api/order.js on this site, which holds the store's
+   * Admin credentials. Resolves to { found, order }, or { configured: false }
+   * while the store has not been connected yet. */
+
+  function orderLookup(order, contact) {
+    var url = config.apiBase + '/api/order';
+    return fetcher()(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ order: String(order || ''), contact: String(contact || '') })
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (body) {
+        body = body || {};
+        if (res.status === 200 && body.found) return { found: true, order: body.order };
+        if (res.status === 200 && body.configured === false) return { found: false, configured: false };
+        if (res.status === 200 || res.status === 404) return { found: false };
+        throw StorefrontError(body.error || 'Order lookup is not answering right now. Try again shortly.', res.status);
+      });
+    }, function () {
+      throw StorefrontError('Could not reach the order desk. Check your connection and try again.');
+    });
+  }
+
   /* ============================================================== UTILITIES */
 
   /** A Shopify image at the width actually drawn, so a 320 px tile does not
@@ -833,6 +914,9 @@
     recommendations: recommendations,
     suggest: suggest,
     searchAll: searchAll,
+    policies: policies,
+    orderLookup: orderLookup,
+    plainText: plainText,
 
     cartGet: cartGet,
     cartAdd: cartAdd,

@@ -125,7 +125,7 @@
       '<div class="announce"><div class="wrap">' +
         '<a href="#/help">Questions? ' + esc(C.support.phoneLabel) + '</a>' +
         '<span class="mid">Pet food, pharmacy and everyday care, delivered across India</span>' +
-        '<div><a href="' + esc(S.shopUrl(C.policies.account)) + '">Track an order</a></div>' +
+        '<div><a href="#/track">Track an order</a></div>' +
       '</div></div>' +
       '<header class="site">' +
         '<div class="bar">' +
@@ -239,6 +239,7 @@
         '</ul></div>' +
         '<div><h4>Help</h4><ul>' +
           '<li><a href="#/help">Contact us</a></li>' +
+          '<li><a href="#/track">Track an order</a></li>' +
           '<li><a href="' + esc(S.shopUrl(C.policies.shipping)) + '">Shipping</a></li>' +
           '<li><a href="' + esc(S.shopUrl(C.policies.refund)) + '">Returns</a></li>' +
           '<li><a href="' + esc(S.shopUrl(C.policies.account)) + '">Your account</a></li>' +
@@ -419,8 +420,19 @@
           (p.available && p.wasPaise ? '<span class="was">' + money(p.wasPaise) + '</span>' : '') +
           (off ? '<span class="off">' + off + '% off</span>' : '') +
         '</div>' +
+        quickHtml(p) +
       '</div>' +
     '</div>';
+  }
+
+  /* Straight into the bag from a listing when there is only one size; with
+   * sizes to pick, the button opens the product page instead. */
+  function quickHtml(p) {
+    if (!p.available) return '';
+    if (p.quickVariant) {
+      return '<button class="tadd" data-quick="' + esc(p.quickVariant) + '" data-title="' + esc(p.title) + '">Add to bag</button>';
+    }
+    return '<a class="tadd alt" href="#/p/' + esc(p.handle) + '">' + (p.sizes > 1 ? 'Choose size' : 'View') + '</a>';
   }
 
   function tiles(list) { return list.map(tileHtml).join(''); }
@@ -926,12 +938,13 @@
         '<a href="tel:' + esc(C.support.phone) + '"><b>Call</b><span>' + esc(C.support.phoneLabel) + '</span></a>' +
         '<a href="https://wa.me/' + esc(C.support.whatsapp) + '"><b>WhatsApp</b><span>Message us about an order</span></a>' +
         '<a href="mailto:' + esc(C.support.email) + '"><b>Email</b><span>' + esc(C.support.email) + '</span></a>' +
-        '<a href="' + esc(S.shopUrl(C.policies.account)) + '"><b>Your orders</b><span>Track or reorder</span></a>' +
+        '<a href="#/track"><b>Track an order</b><span>Where it is and when it arrives</span></a>' +
       '</div>' +
       '<section class="band" style="padding-top:34px"><div style="display:grid;gap:10px;max-width:70ch">' +
         '<details class="expand"><summary><span class="plus">+</span> When will my order arrive?</summary>' +
           '<div class="inner">Delivery time and charge depend on weight and address, and both are shown at checkout before you pay. ' +
-          'Full terms are on our <a href="' + esc(S.shopUrl(C.policies.shipping)) + '">shipping page</a>.</div></details>' +
+          'Full terms are on our <a href="' + esc(S.shopUrl(C.policies.shipping)) + '">shipping page</a>. ' +
+          'Already ordered? <a href="#/track">Track it here</a>, or <a href="#/help" data-act="chat">ask our assistant</a> for a date to your pincode.</div></details>' +
         '<details class="expand"><summary><span class="plus">+</span> Can I return something?</summary>' +
           '<div class="inner">See our <a href="' + esc(S.shopUrl(C.policies.refund)) + '">returns page</a> for what can be sent back and in what condition.</div></details>' +
         '<details class="expand"><summary><span class="plus">+</span> Do you need a prescription?</summary>' +
@@ -943,7 +956,163 @@
       '</div></section></div>';
   }
 
+  /* ================================================================= TRACK
+   * The order number and the phone or email it was placed with, then where
+   * the parcel is and when it should arrive. The lookup runs on the server
+   * (api/order.js), which is the only place that can read orders. A
+   * successful lookup is kept for this visit, so the assistant and this page
+   * share it and a refresh does not ask again. */
+
+  var A = window.PTAssist;
+  var TRACK_KEY = 'pt_track';
+  var STEPS = ['Placed', 'Packed', 'Shipped', 'Out for delivery', 'Delivered'];
+  var HEADLINES = {
+    placed: 'Confirmed', packed: 'Being packed', shipped: 'On its way', out_for_delivery: 'Out for delivery',
+    delivered: 'Delivered', cancelled: 'Cancelled', attempted: 'Delivery attempted', issue: 'Delivery problem'
+  };
+
+  function rememberOrder(order, contact) {
+    try { sessionStorage.setItem(TRACK_KEY, JSON.stringify({ order: order, contact: contact })); } catch (e) { /* blocked */ }
+  }
+  function recalledOrder() {
+    try { return JSON.parse(sessionStorage.getItem(TRACK_KEY) || 'null'); } catch (e) { return null; }
+  }
+
+  var termsPromise = null;
+  function deliveryTerms() {
+    if (!termsPromise) {
+      termsPromise = S.policies({ shippingPath: C.policies.shipping, refundPath: C.policies.refund })
+        .then(function (p) { return A.parseDelivery(p.shipping.text); })
+        .catch(function () { termsPromise = null; return { dispatch: null, ranges: [] }; });
+    }
+    return termsPromise;
+  }
+
+  function day(iso) { return iso ? A.fmtDay(new Date(iso)) : ''; }
+
+  /** The order as a card: headline, expected date, the five steps, courier,
+   *  and the items behind a + expander. `compact` is the assistant's size. */
+  function orderCardHtml(o, eta, compact) {
+    var stage = o.stage;
+    var step = o.step >= 0 ? o.step : (stage === 'attempted' || stage === 'issue' ? 3 : -1);
+    var right = '';
+    if (stage === 'delivered' && eta && eta.delivered) right = '<small>Delivered</small><b>' + esc(A.fmtDay(eta.delivered)) + '</b>';
+    else if (stage === 'out_for_delivery') right = '<small>Arriving</small><b>Today</b>';
+    else if (eta && eta.to && stage !== 'cancelled') {
+      var same = eta.upTo || !eta.from || eta.from.toDateString() === eta.to.toDateString();
+      right = '<small>' + (eta.basis === 'courier' ? 'Courier expects' : 'Expected') + '</small>' +
+        '<b>' + esc(same ? A.fmtDay(eta.to) : A.fmtDay(eta.from) + ' to ' + A.fmtDay(eta.to)) + '</b>';
+    }
+    var steps = stage === 'cancelled' ? '' : '<ol class="osteps' + (stage === 'attempted' || stage === 'issue' ? ' warn' : '') + '">' +
+      STEPS.map(function (label, i) {
+        return '<li class="' + (i < step ? 'done' : i === step ? 'now' : '') + '"><span class="dot"></span><span class="lbl">' + label + '</span></li>';
+      }).join('') + '</ol>';
+    var ship = (o.shipments || []).filter(function (x) { return x.courier || x.url; })[0];
+    var shipHtml = ship ? '<div class="oship"><span>' + esc(ship.courier || 'Courier') + (ship.number ? ' <span class="mono">' + esc(ship.number) + '</span>' : '') + '</span>' +
+      (ship.url ? '<a class="btn quiet" href="' + esc(ship.url) + '" target="_blank" rel="noopener">Track with ' + esc(ship.courier || 'the courier') + '</a>' : '') + '</div>' : '';
+    var items = o.items || [];
+    var count = items.reduce(function (n, it) { return n + (it.qty || 0); }, 0);
+    var itemsHtml = items.length ? '<details class="expand"><summary><span class="plus">+</span> ' + count + ' ' + (count === 1 ? 'item' : 'items') + ' in this order</summary>' +
+      '<div class="inner oitems">' + items.map(function (it) {
+        return '<div class="oitem"><span class="shot">' + (it.image ? '<img src="' + esc(img(it.image, 120)) + '" alt="">' : '') + '</span>' +
+          '<span>' + esc(it.title) + (it.variant ? ' <small>' + esc(it.variant) + '</small>' : '') + '</span><span class="mono">x' + it.qty + '</span></div>';
+      }).join('') + '</div></details>' : '';
+    var where = [o.city, o.zip].filter(Boolean).join(' ');
+    var fine = (o.placedAt ? 'Placed ' + day(o.placedAt) : '') + (where ? (o.placedAt ? ', going to ' : 'Going to ') + where : '');
+    var note = '';
+    if (stage === 'cancelled') note = '<p class="onote">This order was cancelled. Any payment goes back the way it was paid.</p>';
+    if (stage === 'attempted' || stage === 'issue') note = '<p class="onote">The courier could not deliver it. Use their tracking link to rebook, or <a href="#/help">contact us</a>.</p>';
+    if (eta && eta.basis !== 'courier' && eta.to && stage !== 'delivered' && stage !== 'cancelled' && !compact) {
+      note += '<p class="ofine">' + (eta.basis === 'usual' ? 'Estimated from our usual delivery times.' : 'Estimated from our shipping page.') + ' The courier\'s date shows here once it is dispatched.</p>';
+    }
+    return '<div class="ocard' + (compact ? ' compact' : '') + ' st-' + esc(stage) + '">' +
+      '<div class="ohead"><div><span class="eyebrow">Order ' + esc(o.name) + '</span><b class="serif">' + esc(HEADLINES[stage] || o.label) + '</b></div>' +
+        (right ? '<div class="oeta">' + right + '</div>' : '') + '</div>' +
+      steps + note + shipHtml +
+      (compact ? '' : itemsHtml + (fine ? '<p class="ofine">' + esc(fine) + '</p>' : '')) +
+    '</div>';
+  }
+
+  function viewTrack(prefill) {
+    var saved = recalledOrder();
+    var orderVal = prefill ? '#' + String(prefill).replace(/^#/, '') : (saved ? '#' + String(saved.order).replace(/^#/, '') : '');
+    var contactVal = saved && (!prefill || String(saved.order).replace(/^#/, '').toUpperCase() === String(prefill).replace(/^#/, '').toUpperCase()) ? saved.contact : '';
+    app.innerHTML = '<div class="wrap"><div class="trackpage">' +
+      '<div class="eyebrow">Your order</div>' +
+      '<h1 class="serif">Track an order</h1>' +
+      '<p class="lede">The order number is in your confirmation email. Use the phone number or email you ordered with.</p>' +
+      '<form id="trackForm" class="trackform" novalidate>' +
+        '<label><span>Order number</span><input name="order" id="tOrder" placeholder="#1042" autocomplete="off" value="' + esc(orderVal) + '"></label>' +
+        '<label><span>Phone or email</span><input name="contact" id="tContact" placeholder="98450 12345 or you@email.com" autocomplete="email" value="' + esc(contactVal) + '"></label>' +
+        '<button class="btn" type="submit" id="tGo">Track</button>' +
+      '</form>' +
+      '<div id="trackOut" aria-live="polite"></div>' +
+    '</div></div>';
+    if (orderVal && contactVal) runTrack(orderVal, contactVal);
+  }
+
+  function runTrack(order, contact) {
+    var out = document.getElementById('trackOut');
+    var go = document.getElementById('tGo');
+    if (!out) return;
+    if (!String(order).replace(/\D/g, '') || !String(contact).trim()) {
+      out.innerHTML = '<p class="tmsg">Enter both the order number and the phone number or email.</p>';
+      return;
+    }
+    if (go) { go.disabled = true; go.textContent = 'Looking'; }
+    out.innerHTML = '<div class="skel" style="height:180px"><div class="bar"></div></div>';
+    Promise.all([S.orderLookup(order, contact), deliveryTerms()]).then(function (r) {
+      var res = r[0];
+      if (go) { go.disabled = false; go.textContent = 'Track'; }
+      if (res.configured === false) {
+        out.innerHTML = '<div class="note"><b>Tracking here is being connected</b>' +
+          '<span>Your confirmation email has a "View your order" link with its live status, or our team can check it for you on ' +
+          '<a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp</a> or <a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a>.</span></div>';
+        return;
+      }
+      if (!res.found) {
+        out.innerHTML = '<div class="note"><b>We could not find that order</b>' +
+          '<span>The order number and the phone or email both have to match the order. Check them against your confirmation email, or try the other contact.</span></div>';
+        return;
+      }
+      rememberOrder(order, contact);
+      out.innerHTML = orderCardHtml(res.order, A.orderEta(res.order, r[1], C.delivery && C.delivery.fallbackDays), false);
+    }).catch(function (e) {
+      if (go) { go.disabled = false; go.textContent = 'Track'; }
+      out.innerHTML = errorBlock(e, 'data-act="retryTrack"');
+    });
+  }
+
+  document.addEventListener('submit', function (e) {
+    if (e.target && e.target.id === 'trackForm') {
+      e.preventDefault();
+      runTrack(document.getElementById('tOrder').value, document.getElementById('tContact').value);
+    }
+  });
+
   /* ================================================================== CART */
+
+  /** Add one of a single-size product without leaving the page. Used by the
+   *  listing tiles and the assistant. */
+  function quickAdd(variantId, button, title) {
+    if (button) { if (button.disabled) return Promise.resolve(); button.disabled = true; button.textContent = 'Adding'; }
+    return S.cartAdd(variantId, 1).then(function (cart) {
+      state.cart = cart;
+      updatePip();
+      if (state.drawer) renderDrawer();
+      toast((title ? title + ' is' : 'Added') + (title ? ' in your bag' : ' to your bag'));
+      if (button) {
+        button.textContent = 'In your bag';
+        button.classList.add('done');
+        setTimeout(function () { button.disabled = false; button.textContent = 'Add another'; }, 1400);
+      }
+      return cart;
+    }).catch(function (e) {
+      if (button) { button.disabled = false; button.textContent = 'Add to bag'; }
+      toast((e && e.storefront && e.message) || 'Could not add that right now.');
+      throw e;
+    });
+  }
 
   function refreshCart() {
     return S.cartGet({ quiet: true }).then(function (cart) {
@@ -1008,6 +1177,7 @@
     if (p0 === 'saved') return { page: 'saved', parts: parts };
     if (p0 === 'bag') return { page: 'bag', parts: parts };
     if (p0 === 'help') return { page: 'help', parts: parts };
+    if (p0 === 'track' || p0 === 'orders' || p0 === 'order') return { page: 'track', parts: parts };
     return { page: 'missing', parts: parts };
   }
 
@@ -1018,7 +1188,7 @@
 
   var TITLES = {
     home: 'Paws and Tails, pet food, pharmacy and care', all: 'Shop all', collections: 'Collections',
-    brands: 'Brands', search: 'Search', saved: 'Saved', bag: 'Your bag', help: 'Help'
+    brands: 'Brands', search: 'Search', saved: 'Saved', bag: 'Your bag', help: 'Help', track: 'Track an order'
   };
 
   function draw() {
@@ -1038,6 +1208,7 @@
     else if (r.page === 'saved') viewSaved();
     else if (r.page === 'bag') viewBag();
     else if (r.page === 'help') viewHelp();
+    else if (r.page === 'track') viewTrack(r.parts[1] || '');
     else {
       app.innerHTML = '<div class="wrap"><div class="empty"><h1>This page is not here</h1>' +
         '<p>The link may be old, or mistyped.</p><a class="btn" href="#/">Back to the front</a></div></div>';
@@ -1092,6 +1263,13 @@
       return;
     }
 
+    var quick = e.target.closest('[data-quick]');
+    if (quick) {
+      e.preventDefault();
+      quickAdd(quick.getAttribute('data-quick'), quick, quick.getAttribute('data-title')).catch(function () { /* toasted */ });
+      return;
+    }
+
     var act = e.target.closest('[data-act]');
     if (!act) return;
     var name = act.getAttribute('data-act');
@@ -1118,6 +1296,8 @@
     }
     else if (name === 'retryList') { e.preventDefault(); document.getElementById('listNote').innerHTML = ''; loadList(list.items.length === 0); }
     else if (name === 'reload') { e.preventDefault(); draw(); }
+    else if (name === 'retryTrack') { e.preventDefault(); runTrack(document.getElementById('tOrder').value, document.getElementById('tContact').value); }
+    else if (name === 'openBag') { e.preventDefault(); state.drawer = true; renderDrawer(); refreshCart(); }
   });
 
   document.addEventListener('change', function (e) {
@@ -1139,6 +1319,21 @@
   });
 
   window.addEventListener('hashchange', draw);
+
+  /* The assistant (assets/chat.js) shares these: the bag, the order card,
+   * the remembered lookup and the delivery terms. */
+  window.PTApp = {
+    quickAdd: quickAdd,
+    orderCardHtml: orderCardHtml,
+    rememberOrder: rememberOrder,
+    recalledOrder: recalledOrder,
+    deliveryTerms: deliveryTerms,
+    loadCollections: loadCollections,
+    openBag: function () { state.drawer = true; renderDrawer(); refreshCart(); },
+    esc: esc,
+    img: img,
+    money: money
+  };
 
   /* ==================================================================== BOOT */
 

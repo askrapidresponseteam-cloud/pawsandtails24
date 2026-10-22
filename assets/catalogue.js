@@ -20,6 +20,9 @@
     "phoneLabel": "033-3597-8875",
     "email": "contact@pawsandtails24.com"
   },
+  "delivery": {
+    "fallbackDays": [3, 7]
+  },
   "policies": {
     "account": "/account",
     "refund": "/pages/returns",

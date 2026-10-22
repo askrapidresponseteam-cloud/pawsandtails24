@@ -87,6 +87,25 @@ function why(e) {
     line('add to bag', false, 'no sellable product found to try', true);
   }
 
+  /* What the assistant and the track page read for delivery dates. */
+  try {
+    const A = require(path.join(__dirname, '..', 'assets', 'assistant.js'));
+    const pol = await S.policies({ shippingPath: C.policies.shipping, refundPath: C.policies.refund });
+    const t = A.parseDelivery(pol.shipping.text);
+    line('shipping page', !!pol.shipping.text, pol.shipping.text
+      ? (t.ranges.length ? 'delivery ' + t.ranges.map((r) => r.min + '-' + r.max + ' days' + (r.label ? ' ' + r.label : '')).join(', ') : 'read, but no delivery days found: estimates use ' + C.delivery.fallbackDays.join('-') + ' days')
+      : 'not readable: estimates use ' + C.delivery.fallbackDays.join('-') + ' days', false);
+    line('returns page', !!pol.refund.text, pol.refund.text ? pol.refund.text.length + ' characters' : 'not readable', false);
+  } catch (e) { line('shipping page', false, why(e), false); }
+
+  /* A made-up order: proves the lookup is reachable and connected, finds nothing. */
+  try {
+    const r = await S.orderLookup('#100', 'nobody@example.com');
+    line('order tracking', r.configured !== false, r.configured === false
+      ? 'not connected yet: set SHOPIFY_SHOP, SHOPIFY_CLIENT_ID and SHOPIFY_CLIENT_SECRET on Vercel'
+      : 'connected to the store', false);
+  } catch (e) { line('order tracking', false, why(e), false); }
+
   process.stdout.write('\n  ' + (blocking ? blocking + ' blocking problem(s)' : 'the shop works end to end') +
     (warnings ? ', ' + warnings + ' warning(s)' : '') + '\n\n');
   process.exit(blocking ? 1 : 0);

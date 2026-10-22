@@ -29,6 +29,43 @@ function eq(what, got, want) {
 }
 function section(name) { process.stdout.write('\n  ' + name + '\n'); }
 
+/* In the page: for each placed product picture under `scope`, the product's
+ * longer side and its centre, as shares of its frame. */
+function pictureGeometry(scope) {
+  return Array.from(document.querySelectorAll(scope)).map(function (img) {
+    var m = window.PTFit.known[window.PTFit.keyOf(img.getAttribute('src'))];
+    /* Measured against the frame's inside, the box the picture is placed in. */
+    var el = img.parentElement, o = el.getBoundingClientRect();
+    var f = { left: o.left + el.clientLeft, top: o.top + el.clientTop, width: el.clientWidth, height: el.clientHeight };
+    f.right = f.left + f.width; f.bottom = f.top + f.height;
+    var r = img.getBoundingClientRect();
+    if (!m || !img.classList.contains('fit')) return { placed: false, src: img.getAttribute('src') };
+    var bw = (m.x1 - m.x0) * r.width, bh = (m.y1 - m.y0) * r.height;
+    return {
+      placed: true, photo: !!m.photo, src: img.getAttribute('src'),
+      side: Math.max(bw / f.width, bh / f.height),
+      cx: (r.left + (m.x0 + m.x1) / 2 * r.width - f.left) / f.width,
+      cy: (r.top + (m.y0 + m.y1) / 2 * r.height - f.top) / f.height,
+      covers: r.left <= f.left + 0.5 && r.top <= f.top + 0.5 && r.right >= f.right - 0.5 && r.bottom >= f.bottom - 0.5,
+      shown: getComputedStyle(img).opacity === '1'
+    };
+  });
+}
+function sameSize(list, share) {
+  var bad = list.filter(function (g) {
+    if (!g.placed || !g.shown) return true;
+    if (g.photo) return !g.covers;
+    return Math.abs(g.side - share) > 0.015 || Math.abs(g.cx - 0.5) > 0.015 || Math.abs(g.cy - 0.5) > 0.015;
+  });
+  return bad.map(function (g) { return g.src + (g.placed ? ' side ' + g.side.toFixed(3) + ' at ' + g.cx.toFixed(3) + ',' + g.cy.toFixed(3) : ' not placed'); });
+}
+async function waitPictures(page, scope) {
+  await page.waitForFunction((sel) => {
+    const imgs = document.querySelectorAll(sel);
+    return imgs.length > 0 && Array.from(imgs).every((i) => i.classList.contains('fit-done') && getComputedStyle(i).opacity === '1');
+  }, scope, { timeout: 15000 });
+}
+
 (async function run() {
   await new Promise((resolve) => mock.server.listen(PORT, resolve));
   const products = mock.products;
@@ -93,6 +130,29 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
       await page.waitForFunction((n) => document.querySelectorAll('#listGrid .tile').length > n, before, { timeout: 10000 });
     }
     eq('every product in the store is reachable from shop all', await page.locator('#listGrid .tile').count(), products.length);
+
+    /* ------------------------------------------------------- product pictures */
+    section('every product picture at the same size');
+    await waitPictures(page, '#listGrid .tile .shot img');
+    const grid = await page.evaluate(pictureGeometry, '#listGrid .tile .shot img');
+    eq('every tile in shop all has its picture', grid.length, products.length);
+    const kinds = new Set(grid.map((g) => (g.src.match(/mock-img\/([a-z]+)/) || [])[1]));
+    ok('the pictures include tiny, tight, tall, cut-out, off-centre and photographs', ['tiny', 'huge', 'tall', 'cutout', 'corner', 'photo'].every((k) => kinds.has(k)));
+    const gridBad = sameSize(grid, 0.76);
+    eq('every product fills the same share of its tile, centred' + (gridBad.length ? ': ' + gridBad.slice(0, 3).join(' | ') : ''), gridBad.length, 0);
+    const sides = grid.filter((g) => !g.photo).map((g) => g.side);
+    ok('largest and smallest product differ by under 2 percent of the tile (' + Math.min.apply(null, sides).toFixed(3) + ' to ' + Math.max.apply(null, sides).toFixed(3) + ')',
+      Math.max.apply(null, sides) - Math.min.apply(null, sides) < 0.02);
+    ok('photographs fill their tile', grid.filter((g) => g.photo).length > 0 && grid.filter((g) => g.photo).every((g) => g.covers));
+    const heartRoom = await page.evaluate(() => {
+      const t = document.querySelector('#listGrid .tile');
+      return (t.querySelector('.shot').getBoundingClientRect().width * 0.12) > 20;
+    });
+    ok('the product keeps clear of the tile edges', heartRoom);
+    await page.goto(BASE + '/#/c/dog-food', { waitUntil: 'networkidle' });
+    await page.waitForSelector('#listGrid .tile');
+    const instant = await page.evaluate(() => Array.from(document.querySelectorAll('#listGrid .tile .shot img')).every((i) => i.classList.contains('fit-done')));
+    ok('pictures measured once are placed at once on the next page', instant);
 
     /* --------------------------------------------------------- global search */
     section('search from the header, on any page');
@@ -163,6 +223,12 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
     ok('details sit behind + expanders, closed', (await page.locator('details.expand').count()) >= 2 && (await page.locator('details.expand[open]').count()) === 0);
     await page.locator('.pick').nth(1).click();
     ok('another size changes the price', (await page.locator('.pdp .pricing .now').textContent()) !== shown);
+    await waitPictures(page, '.gallery .main img, .gallery .thumbs img');
+    eq('the big picture shows the product at the set size', sameSize(await page.evaluate(pictureGeometry, '.gallery .main img'), 0.82), []);
+    eq('the small pictures under it match each other', sameSize(await page.evaluate(pictureGeometry, '.gallery .thumbs img'), 0.86), []);
+    await page.locator('.gallery .thumbs button').nth(1).click();
+    await waitPictures(page, '.gallery .main img');
+    eq('another picture chosen shows at the same size', sameSize(await page.evaluate(pictureGeometry, '.gallery .main img'), 0.82), []);
 
     /* ------------------------------------------------------------------- bag */
     section('the bag');
@@ -170,6 +236,8 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
     await page.waitForSelector('.drawer .line', { timeout: 10000 });
     eq('the bag holds what was added', await page.locator('.drawer .line').count(), 1);
     eq('the header counts it', (await page.locator('.pip').textContent()).trim(), '1');
+    await waitPictures(page, '.drawer .line .shot img');
+    eq('the bag shows its product at the set size', sameSize(await page.evaluate(pictureGeometry, '.drawer .line .shot img'), 0.86), []);
     await page.locator('[data-line-up]').click();
     await page.waitForFunction(() => (document.querySelector('.pip') || {}).textContent === '2', null, { timeout: 10000 });
     ok('one more makes two', true);
@@ -222,6 +290,112 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
     await page.waitForSelector('#savedGrid .tile', { timeout: 10000 });
     ok('the saved page reads the product back live', (await page.locator('#savedGrid .tile').count()) === 1);
 
+    /* ------------------------------------------------- add from a listing */
+    section('add to the bag straight from a listing');
+    {
+      const pipNow = async () => Number((await page.locator('.pip').count()) ? (await page.locator('.pip').textContent()) : 0);
+      await page.goto(BASE + '/#/c/deworming', { waitUntil: 'networkidle' });
+      await page.waitForSelector('#listGrid .tile');
+      const single = mock.products.filter((p) => p.aisles.indexOf('deworming') >= 0 && p.availableForSale && p.variants.length === 1);
+      const multi = mock.products.filter((p) => p.aisles.indexOf('deworming') >= 0 && p.availableForSale && p.variants.length > 1);
+      eq('one-size products get Add to bag', await page.locator('#listGrid [data-quick]').count(), single.length);
+      eq('products with sizes get Choose size instead', await page.locator('#listGrid a.tadd', { hasText: 'Choose size' }).count(), multi.length);
+      const before = await pipNow();
+      await page.locator('#listGrid [data-quick]').first().click();
+      await page.waitForFunction((n) => Number((document.querySelector('.pip') || {}).textContent || 0) === n + 1, before, { timeout: 10000 });
+      ok('one tap puts it in the bag and the count goes up', true);
+      ok('the button says it is in the bag', /In your bag|Add another/.test(await page.locator('#listGrid [data-quick]').first().textContent()));
+      ok('and the page stays where it was', /#\/c\/deworming$/.test(page.url()));
+    }
+
+    /* --------------------------------------------------------- track an order */
+    section('track an order');
+    {
+      await page.goto(BASE + '/', { waitUntil: 'networkidle' });
+      eq('the header link opens the track page', await page.locator('.announce a', { hasText: 'Track an order' }).getAttribute('href'), '#/track');
+      await page.goto(BASE + '/#/track', { waitUntil: 'networkidle' });
+      ok('it starts with just the two boxes', (await page.locator('#trackForm input').count()) === 2 && (await page.locator('.ocard').count()) === 0);
+      await page.locator('#tOrder').fill('#1002');
+      await page.locator('#tContact').fill('someone@else.com');
+      await page.locator('#tGo').click();
+      await page.waitForSelector('#trackOut .note', { timeout: 10000 });
+      ok('a contact that does not match is "not found"', /could not find/i.test(await page.locator('#trackOut').textContent()));
+      await page.locator('#tContact').fill('98765 43210');
+      await page.locator('#tGo').click();
+      await page.waitForSelector('.ocard', { timeout: 10000 });
+      eq('the order and where it is', [await page.locator('.ohead .eyebrow').textContent(), await page.locator('.ohead b.serif').textContent()], ['Order #1002', 'On its way']);
+      ok('the courier\'s expected date', /Courier expects/i.test(await page.locator('.oeta').textContent()));
+      eq('the third of five steps is current', await page.locator('.osteps li').evaluateAll((ls) => ls.map((l) => l.className)), ['done', 'done', 'now', '', '']);
+      eq('the courier tracking link opens in a new tab', [await page.locator('.oship a').getAttribute('href'), await page.locator('.oship a').getAttribute('target')],
+        ['https://www.bluedart.com/tracking?awb=BD99887766', '_blank']);
+      ok('the items wait behind a + expander', (await page.locator('.ocard details.expand:not([open])').count()) === 1);
+      const shown = await page.locator('.ocard').textContent();
+      ok('no email or phone on the page', !/9876543210|@/.test(shown));
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('.ocard', { timeout: 10000 });
+      ok('a refresh shows it again without asking', /#1002/.test(await page.locator('.ohead').textContent()));
+      await page.goto(BASE + '/#/track/1001', { waitUntil: 'networkidle' });
+      eq('a link to another order fills in its number and asks for its contact', [await page.locator('#tOrder').inputValue(), await page.locator('#tContact').inputValue()], ['#1001', '']);
+      await page.locator('#tContact').fill('asha@example.com');
+      await page.locator('#tGo').click();
+      await page.waitForSelector('.ocard.st-delivered', { timeout: 10000 });
+      ok('a delivered order says when', /Delivered/.test(await page.locator('.oeta').textContent()));
+      await page.locator('#tOrder').fill('#1003');
+      await page.locator('#tContact').fill('ravi@example.com');
+      await page.locator('#tGo').click();
+      await page.waitForSelector('.ocard.st-placed', { timeout: 10000 });
+      ok('a new order shows an expected range from the shipping page', /Expected/.test(await page.locator('.oeta').textContent()) && /shipping page/i.test(await page.locator('.ocard').textContent()));
+    }
+
+    /* ------------------------------------------------------------- assistant */
+    section('the assistant');
+    {
+      await page.goto(BASE + '/#/c/dog-food', { waitUntil: 'networkidle' });
+      await page.evaluate(() => { try { sessionStorage.removeItem('pt_chat'); } catch (e) { /* ignore */ } });
+      await page.reload({ waitUntil: 'networkidle' });
+      ok('a button in the corner opens it', await page.locator('.cl-launch').isVisible());
+      await page.locator('.cl-launch').click();
+      await page.waitForSelector('.cl-panel:not([hidden]) .cl-row.bot');
+      ok('it says what it can do', /track an order/i.test(await page.locator('.cl-log').textContent()));
+      ok('with quick replies', (await page.locator('.cl-chip').count()) >= 3);
+      await page.locator('.cl-chip', { hasText: 'Best deworming' }).click();
+      await page.waitForSelector('.cprod', { timeout: 10000 });
+      const prices = await page.locator('.cprod .cp-price').allTextContents();
+      ok('best deworming under 500: cards, each under ₹500 (' + prices.join(', ') + ')',
+        prices.length > 0 && prices.length <= 3 && prices.every((t) => Number(t.replace(/[^\d]/g, '')) <= 500));
+      ok('ranked by what sells, and says so', /sells most/i.test(await page.locator('.cl-log').textContent()));
+      const pipBefore = Number(await page.locator('.pip').textContent());
+      await page.locator('.cprod [data-quick]').first().click();
+      await page.waitForFunction((n) => Number((document.querySelector('.pip') || {}).textContent || 0) === n + 1, pipBefore, { timeout: 10000 });
+      ok('a card goes straight into the bag', true);
+
+      const say = async (t) => {
+        const n = await page.locator('.cl-row.bot').count();
+        await page.locator('.cl-input').fill(t);
+        await page.locator('.cl-input').press('Enter');
+        await page.waitForFunction((k) => document.querySelectorAll('.cl-row.bot:not(.cl-typing)').length > k && !document.querySelector('.cl-typing'), n, { timeout: 10000 });
+        return (await page.locator('.cl-row.bot').last().textContent()) || '';
+      };
+      ok('"where is my order" asks for the number', /order number/i.test(await say('where is my order')));
+      ok('then for the phone or email', /phone number or email/i.test(await say('#1002')));
+      await say('98765 43210');
+      await page.waitForSelector('.cl-order .ocard', { timeout: 10000 });
+      ok('then shows the order card', /On its way/.test(await page.locator('.cl-order').last().textContent()));
+      ok('and says when, in words', /courier expects/i.test(await page.locator('.cl-log').textContent()));
+      ok('"when will it arrive" uses our shipping page', /should reach/i.test(await say('when will it arrive if i order today to 560001')));
+      ok('"talk to a person" gives WhatsApp, phone and email', (await (async () => { await say('talk to a person'); return page.locator('.cl-row.bot').last().locator('a[href^="https://wa.me"], a[href^="tel:"], a[href^="mailto:"]').count(); })()) === 3);
+
+      await page.locator('.cl-chip', { hasText: 'Track my order' }).click();
+      await page.waitForTimeout(600);
+      const kept = await page.locator('.cl-row').count();
+      await page.goto(BASE + '/#/all', { waitUntil: 'networkidle' });
+      await page.waitForSelector('#ptchat', { state: 'attached' });
+      ok('the conversation survives moving to another page', (await page.locator('.cl-row').count()) >= kept - 1 && (await page.locator('.cl-row').count()) > 5);
+      await page.keyboard.press('Escape');
+      ok('Escape closes it', await page.locator('.cl-panel').isHidden());
+      ok('and the button comes back', await page.locator('.cl-launch').isVisible());
+    }
+
     /* ------------------------------------------------------------------ phone */
     section('on a phone');
     await page.setViewportSize({ width: 390, height: 844 });
@@ -237,6 +411,17 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
     await page.locator('.burger').click();
     await page.waitForSelector('.sheet nav a');
     ok('the menu lists the live collections', (await page.locator('.sheet nav a[href^="#/c/"]').count()) === 22);
+    await page.goto(BASE + '/#/all', { waitUntil: 'networkidle' });
+    await page.waitForSelector('#listGrid .tile');
+    await waitPictures(page, '#listGrid .tile .shot img');
+    const phoneGrid = sameSize(await page.evaluate(pictureGeometry, '#listGrid .tile .shot img'), 0.70);
+    eq('on a phone every product is the same size too, clear of the heart' + (phoneGrid.length ? ': ' + phoneGrid.slice(0, 2).join(' | ') : ''), phoneGrid.length, 0);
+    await page.locator('.cl-launch').click();
+    await page.waitForSelector('.cl-panel:not([hidden])');
+    const panel = await page.locator('.cl-panel').boundingBox();
+    ok('on a phone the assistant fills the screen', panel && Math.round(panel.width) === 390 && Math.round(panel.height) >= 800);
+    await page.locator('.cl-x').click();
+    ok('and closes back to the page', await page.locator('.cl-panel').isHidden());
     const spill = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     ok('nothing spills sideways on a 390 point screen', spill <= 1);
 
@@ -248,6 +433,26 @@ function section(name) { process.stdout.write('\n  ' + name + '\n'); }
     eq('an old shelf link lands on its collection', await page.locator('#listTitle').textContent(), 'Deworming');
     await page.goto(BASE + '/#/nonsense/x', { waitUntil: 'networkidle' });
     ok('an unknown route says so rather than sitting blank', (await page.locator('.empty h1').count()) === 1);
+
+    section('if photos cannot be measured');
+    {
+      /* The measuring copy is a CORS request; refuse it the way a server
+       * without CORS headers would. The pictures themselves still load. */
+      const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      const p2 = await ctx2.newPage();
+      await p2.route('**/mock-img/**', async (route) => {
+        const h = await route.request().allHeaders();
+        if (h.origin) route.abort(); else route.continue();
+      });
+      await p2.goto(BASE + '/#/c/dog-food', { waitUntil: 'networkidle' });
+      await p2.waitForSelector('#listGrid .tile');
+      await p2.waitForFunction(() => Array.from(document.querySelectorAll('#listGrid .tile .shot img'))
+        .every((i) => i.classList.contains('fit-done') && getComputedStyle(i).opacity === '1'), null, { timeout: 10000 });
+      const fallback = await p2.evaluate(() => Array.from(document.querySelectorAll('#listGrid .tile .shot img'))
+        .map((i) => ({ placed: i.classList.contains('fit'), loaded: i.naturalWidth > 0 })));
+      ok('photos that cannot be measured still show, as they were', fallback.length > 0 && fallback.every((f) => !f.placed && f.loaded));
+      await ctx2.close();
+    }
 
     section('console');
     eq('nothing was logged as an error' + (consoleErrors.length ? ': ' + consoleErrors.slice(0, 3).join(' | ') : ''), consoleErrors.length, 0);

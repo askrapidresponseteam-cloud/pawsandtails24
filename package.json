@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node dev/serve.js",
     "mock": "node test/mock-store.js",
-    "test": "node test/test-storefront.js",
+    "test": "node test/test-storefront.js && node test/test-order-api.js && node test/test-assistant.js",
     "test:ui": "node test/test-ui.js"
   },
   "engines": { "node": ">=18" }

@@ -123,8 +123,20 @@ function serveFile(res, file) {
   });
 }
 
+/* Order lookups run api/order.js here, exactly as Vercel runs it. It reads
+ * SHOPIFY_SHOP and the app credentials from the environment; without them
+ * it answers "not set up yet", which the track page explains. */
+const orderApi = require(path.join(ROOT, 'api', 'order.js'));
+
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent(String(req.url || '/').split('?')[0]);
+
+  if (url === '/api/order') {
+    const started = Date.now();
+    res.on('finish', () => log(`  ${String(res.statusCode).padEnd(3)}  ${String(Date.now() - started).padStart(5)}ms            order lookup`));
+    orderApi(req, res);
+    return;
+  }
 
   if (url.startsWith('/api/')) {
     if (req.method !== 'POST') {
@@ -158,6 +170,7 @@ server.listen(PORT, () => {
   log('  open          http://localhost:' + PORT);
   log('  catalogue     forwarded to https://' + UPSTREAM + '/api/...');
   log('  token         ' + (TOKEN ? 'sent with every call' : 'none (tokenless, same as production)'));
+  log('  order lookup  ' + (orderApi.configured() ? 'on, reading orders from ' + process.env.SHOPIFY_SHOP : 'off (set SHOPIFY_SHOP and the app credentials to try it)'));
   log('');
   log('  Each line below is one live call to the store:');
   log('');

@@ -10,6 +10,12 @@ echo
 echo "==> storefront client"
 node test/test-storefront.js
 
+echo "==> order lookup"
+node test/test-order-api.js
+
+echo "==> assistant"
+node test/test-assistant.js
+
 echo "==> browser"
 if node -e "require('playwright')" >/dev/null 2>&1; then
   node test/test-ui.js

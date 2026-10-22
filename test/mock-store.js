@@ -57,7 +57,9 @@ FIXTURE.forEach((shelf, si) => {
     for (let k = 0; k < n; k++) {
       const idx = products.length + 1;
       const brand = BRANDS[idx % BRANDS.length];
-      const base = 180 + ((idx * 137) % 9000);
+      /* Deworming is priced as it is in real shops, a few hundred rupees, so
+       * "best deworming under 500" has real answers to find. */
+      const base = aisle.handle === 'deworming' ? 140 + k * 110 : 180 + ((idx * 137) % 9000);
       const soldOut = idx % 17 === 0;
       const onOffer = idx % 3 === 0;
       const sizes = idx % 4 === 0 ? ['250 g'] : ['250 g', '1 kg', '4 kg'];
@@ -88,18 +90,50 @@ FIXTURE.forEach((shelf, si) => {
   });
 });
 
+/* Product photos as stores really have them: some with a wide white margin,
+ * some cropped tight, tall and wide pictures, a cut-out on transparency and
+ * an edge-to-edge photograph. Served at /mock-img/<kind>-<n>.svg. The shop has
+ * to show every product at the same size whatever the picture looks like. */
+const SHOT_KINDS = ['tiny', 'huge', 'tall', 'cutout', 'corner', 'photo'];
+function shotUrl(idx, k) { return '/mock-img/' + SHOT_KINDS[(idx + k) % SHOT_KINDS.length] + '-' + idx + '.svg'; }
+function shotSvg(kind, n) {
+  const hue = (n * 47) % 360;
+  const fill = 'hsl(' + hue + ',55%,48%)';
+  const dark = 'hsl(' + hue + ',55%,30%)';
+  /* [canvas width, height, product box x, y, w, h, background] */
+  const spec = {
+    tiny:   [800, 800, 320, 300, 160, 200, '#ffffff'],
+    huge:   [800, 800, 32, 20, 736, 760, '#ffffff'],
+    tall:   [600, 900, 200, 180, 200, 540, '#ffffff'],
+    cutout: [1000, 600, 150, 90, 700, 420, 'none'],
+    corner: [800, 800, 40, 60, 260, 300, '#ffffff'],
+    photo:  [900, 900, 0, 0, 900, 900, 'hsl(' + hue + ',30%,82%)']
+  }[kind] || [800, 800, 200, 200, 400, 400, '#ffffff'];
+  const [W, H, x, y, w, h, bg] = spec;
+  const body = kind === 'photo'
+    ? '<defs><linearGradient id="g" x2="1" y2="1"><stop offset="0" stop-color="' + bg + '"/>' +
+      '<stop offset="1" stop-color="hsl(' + hue + ',40%,35%)"/></linearGradient></defs>' +
+      '<rect width="' + W + '" height="' + H + '" fill="url(#g)"/><circle cx="450" cy="470" r="260" fill="' + fill + '"/>'
+    : (bg === 'none' ? '' : '<rect width="' + W + '" height="' + H + '" fill="' + bg + '"/>') +
+      '<rect x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="' + Math.round(Math.min(w, h) / 10) + '" fill="' + fill + '"/>' +
+      '<rect x="' + (x + w * 0.15) + '" y="' + (y + h * 0.35) + '" width="' + (w * 0.7) + '" height="' + (h * 0.3) + '" fill="' + dark + '"/>';
+  return '<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">' + body + '</svg>';
+}
+function idxOf(p) { return Number(String(p.id).split('/').pop()); }
+
 function tile(p) {
   const prices = p.variants.map((v) => Number(v.price.amount));
   const was = p.variants.map((v) => (v.compareAtPrice ? Number(v.compareAtPrice.amount) : 0));
   return {
     id: p.id, handle: p.handle, title: p.title, vendor: p.vendor, productType: p.productType,
     availableForSale: p.availableForSale,
-    featuredImage: null,
+    featuredImage: { url: shotUrl(idxOf(p), 0) },
     priceRange: {
       minVariantPrice: { amount: Math.min.apply(null, prices).toFixed(2), currencyCode: 'INR' },
       maxVariantPrice: { amount: Math.max.apply(null, prices).toFixed(2) }
     },
-    compareAtPriceRange: { maxVariantPrice: { amount: Math.max.apply(null, was).toFixed(2) } }
+    compareAtPriceRange: { maxVariantPrice: { amount: Math.max.apply(null, was).toFixed(2) } },
+    variants: { nodes: p.variants.slice(0, 2).map((v) => ({ id: v.id, availableForSale: v.availableForSale })) }
   };
 }
 
@@ -107,7 +141,8 @@ function full(p) {
   return {
     id: p.id, handle: p.handle, title: p.title, vendor: p.vendor, productType: p.productType,
     descriptionHtml: p.descriptionHtml, availableForSale: p.availableForSale, tags: p.tags,
-    featuredImage: null, images: { nodes: [] },
+    featuredImage: { url: shotUrl(idxOf(p), 0) },
+    images: { nodes: [0, 1, 2].map((k) => ({ url: shotUrl(idxOf(p), k) })) },
     options: [{ name: p.variants.length > 1 ? 'Size' : 'Title', values: p.variants.map((v) => v.title) }],
     variants: { nodes: p.variants }
   };
@@ -157,7 +192,7 @@ function cartJson(cart) {
         quantityAvailable: hit.variant.quantityAvailable,
         price: hit.variant.price, compareAtPrice: hit.variant.compareAtPrice,
         image: null,
-        product: { handle: hit.product.handle, title: hit.product.title, vendor: hit.product.vendor, featuredImage: null }
+        product: { handle: hit.product.handle, title: hit.product.title, vendor: hit.product.vendor, featuredImage: { url: shotUrl(idxOf(hit.product), 0) } }
       }
     };
   });
@@ -187,7 +222,27 @@ function addLines(cart, lines) {
 
 /* ----------------------------------------------------------------- resolver */
 
+/* The store's own policy pages, as a shop might word them. The assistant and
+ * the track page read delivery times and charges from this text. */
+const POLICY = {
+  shipping: '<h2>Shipping</h2><p>Orders placed before 2 pm are dispatched within 1-2 working days.</p>' +
+    '<p>Delivery takes 3-5 working days to metro cities and 5-8 working days to the rest of India.</p>' +
+    '<p>Shipping is free on orders above &#8377;999; below that a flat &#8377;79 applies.</p>' +
+    '<p>Cash on delivery is available on orders up to &#8377;5,000.</p>',
+  refund: '<p>Unopened products can be returned within 7 days of delivery.</p>' +
+    '<p>Medicines and opened food cannot be returned for safety reasons.</p>' +
+    '<p>Refunds reach your original payment method within 5-7 working days after we receive the item.</p>'
+};
+
 function resolve(op, v, query) {
+  if (op === 'PtPolicies') {
+    return {
+      shop: { shippingPolicy: null, refundPolicy: { body: POLICY.refund, url: 'https://pawsandtails24.com/policies/refund-policy' } },
+      ship: v.ship === 'shipping' ? { body: POLICY.shipping } : null,
+      refund: null
+    };
+  }
+
   if (op === 'PtCheckShop') return { shop: { name: 'Paws and Tails (mock)' } };
 
   if (op === 'PtCheckCols') {
@@ -373,8 +428,17 @@ const TYPES = {
   '.woff2': 'font/woff2'
 };
 
+/* Order lookups run the real api/order.js against a stand-in Admin API. */
+const admin = require('./mock-admin.js')({ products: products });
+const orderApi = require(path.join(ROOT, 'api', 'order.js')).createHandler({ env: admin.env, fetchImpl: admin.fetch });
+
 const server = http.createServer((req, res) => {
   const url = String(req.url || '/').split('?')[0];
+
+  if (url === '/api/order') {
+    orderApi(req, res);
+    return;
+  }
 
   if (url.startsWith('/api/')) {
     const chunks = [];
@@ -399,6 +463,14 @@ const server = http.createServer((req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
       res.end(JSON.stringify(out.errors ? out : { data: out }));
     });
+    return;
+  }
+
+  if (url.startsWith('/mock-img/')) {
+    const m = url.match(/^\/mock-img\/([a-z]+)-(\d+)\.svg$/);
+    if (!m) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'max-age=60' });
+    res.end(shotSvg(m[1], Number(m[2])));
     return;
   }
 
@@ -432,4 +504,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, products, PORT };
+module.exports = { server, products, PORT, admin, POLICY };
