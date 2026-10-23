@@ -20,6 +20,9 @@
   S.configure({ version: C.apiVersion, domain: C.domain, apiBase: window.PT_API_BASE || '', token: window.PT_TOKEN || '', brands: C.brands || [] });
 
   var app = document.getElementById('app');
+  /* Which release this page is, shown small in the footer, so a screenshot
+   * always says what was running. */
+  var BUILD = (document.querySelector('meta[name="pt-build"]') || {}).content || '';
   var state = {
     cart: null, drawer: false, menu: false, mega: false, sort: 'featured',
     cols: null, colsLoading: null, toastTimer: null
@@ -285,7 +288,7 @@
           '<li><a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp</a></li>' +
         '</ul></div>' +
       '</div>' +
-      '<div class="legal"><span>Paws and Tails, ' + esc(C.domain) + '</span>' +
+      '<div class="legal"><span>Paws and Tails, ' + esc(C.domain) + (BUILD ? ' <span class="build">Build ' + esc(BUILD) + '</span>' : '') + '</span>' +
         '<span>Prices and stock come from our store in real time.</span></div>' +
       '</footer>';
   }

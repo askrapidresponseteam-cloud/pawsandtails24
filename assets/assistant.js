@@ -557,53 +557,140 @@
       return !rest.length;
     }
 
-    /** Products for what was asked: { picks, seen, what, more, ranked, col, search }. */
+    /* Words in collection titles that say what kind of thing, not which. */
+    var GENERIC = { food: 1, foods: 1, all: 1, dog: 1, dogs: 1, cat: 1, cats: 1, the: 1, and: 1, best: 1, for: 1, pet: 1, pets: 1, range: 1, products: 1, store: 1, shop: 1 };
+
+    /** A collection the message names outright: every word of its title is
+     *  in the message, and at least one of them is not generic. "acana"
+     *  names "Acana"; "acana dog food" names "Acana Dog Food". The longest
+     *  such title wins. */
+    function namedCollection(cols, words) {
+      var have = {};
+      words.forEach(function (w) { have[N.stem(w)] = true; have[w] = true; });
+      var best = null, bestLen = 0;
+      (cols || []).forEach(function (c) {
+        var tw = N.tokens(c.title).map(N.stem).filter(function (w) { return w.length > 1 && w !== '&'; });
+        if (!tw.length || !tw.some(function (w) { return !GENERIC[w]; })) return;
+        if (!tw.every(function (w) { return have[w]; })) return;
+        if (tw.length > bestLen) { best = c; bestLen = tw.length; }
+      });
+      return best;
+    }
+
+    /* The typo fixer learns the store's own names (brands, collections) the
+     * first time they are seen, so "acanna" or "aminorch" still land. */
+    var learned = false;
+    function learn(cols) {
+      if (learned || !cols || !cols.length) return;
+      learned = true;
+      cols.forEach(function (c) {
+        N.tokens(c.title).forEach(function (w) { if (w.length >= 4 && /^[a-z]+$/.test(w)) vocab[w] = true; });
+      });
+    }
+
+    function pageOfList(list) { return { products: list, hasMore: false, cursor: null }; }
+
+    /**
+     * Products for what was asked, trying one source after another until one
+     * has something that fits:
+     *   1. a collection the message names ("Acana")
+     *   2. the collection for the kind of product ("deworming" for dogs)
+     *   3. the brand (vendor or title)
+     *   4. the store's own search, as the search box uses it
+     *   5. the store's as-you-type suggestions
+     *   6. the brand name alone, if extra words found nothing
+     * Resolves to { picks, seen, what, more, ranked, col, scored } or null
+     * when there is nothing to look for.
+     */
     function find(e, enough) {
       return getCols().then(function (cols) {
-        var col = e.brand ? null : pickCollection(cols, e.topic, e.pet);
+        learn(cols);
         var sort = e.cheap ? 'priceLow' : 'featured';
-        var source, what, more, ranked, search = false;
-        if (col) {
-          source = function (after) { return S.collectionPage(col.handle, { sort: sort, after: after }); };
-          what = col.title;
-          more = { label: 'See all of ' + col.title, href: '#/c/' + encodeURIComponent(col.handle) };
-          ranked = e.cheap ? 'cheap' : 'best';
-        } else if (brandOnly(e) && !e.topic) {
-          source = function (after) { return S.brandPage(e.brand, { sort: sort, after: after }); };
-          what = e.brand;
-          more = { label: 'See all ' + e.brand, href: '#/brand/' + encodeURIComponent(e.brand) };
-          ranked = e.cheap ? 'cheap' : 'best';
-        } else {
-          var q = e.terms || (e.topic ? e.topic.label : '') || (e.pet ? e.pet.pet : '');
-          if (!q) return null;
-          source = function (after) { return S.searchAll(q, { after: after, sort: sort }); };
-          what = '"' + q + '"';
-          more = { label: 'See all results', href: '#/search/' + encodeURIComponent(q) };
-          ranked = e.cheap ? 'cheap' : 'match';
-          search = q;
+        var words = N.tokens(N.normalise(e._raw || e.terms || ''));
+        var plans = [];
+        var named = namedCollection(cols, words);
+        /* A named collection that is not the brand asked for ("All Medicines"
+         * in "drools all medicines") comes after the brand. */
+        if (named && e.brand && lower(named.title).indexOf(lower(e.brand)) < 0) {
+          plans.push({ fetch: function (after) { return S.brandPage(e.brand, { sort: sort, after: after }); },
+            what: e.brand, more: { label: 'See all ' + e.brand, href: '#/brand/' + encodeURIComponent(e.brand) }, ranked: e.cheap ? 'cheap' : 'best', name: e.brand, brand: true });
         }
-        var keep = function (p) {
-          if (!p.available || !within(p, e.price)) return false;
-          if (e.brand && search && p.brand && lower(p.brand) !== lower(e.brand)) return false;
-          if (e.pet && !col) {
-            var t = lower(p.title + ' ' + p.type);
-            var other = Object.keys(N.PETS).some(function (k) { return k !== e.pet.pet && N.PETS[k].some(function (w) { return t.indexOf(w) >= 0; }); });
-            if (other && !N.PETS[e.pet.pet].some(function (w) { return t.indexOf(w) >= 0; })) return false;
+        if (named) plans.push({ fetch: function (after) { return S.collectionPage(named.handle, { sort: sort, after: after }); },
+          what: named.title, more: { label: 'See all of ' + named.title, href: '#/c/' + encodeURIComponent(named.handle) }, ranked: e.cheap ? 'cheap' : 'best', col: named, name: named.title });
+        var topical = e.brand ? null : pickCollection(cols, e.topic, e.pet);
+        if (topical && topical !== named) plans.push({ fetch: function (after) { return S.collectionPage(topical.handle, { sort: sort, after: after }); },
+          what: topical.title, more: { label: 'See all of ' + topical.title, href: '#/c/' + encodeURIComponent(topical.handle) }, ranked: e.cheap ? 'cheap' : 'best', col: topical, name: topical.title });
+        if (e.brand && !plans.some(function (pl) { return pl.brand; })) plans.push({ fetch: function (after) { return S.brandPage(e.brand, { sort: sort, after: after }); },
+          what: e.brand, more: { label: 'See all ' + e.brand, href: '#/brand/' + encodeURIComponent(e.brand) }, ranked: e.cheap ? 'cheap' : 'best', name: e.brand, brand: true });
+        var q = e.terms || (e.topic ? e.topic.label : '') || (e.pet ? e.pet.pet : '');
+        if (q) {
+          plans.push({ fetch: function (after) { return S.searchAll(q, { after: after, sort: sort }); },
+            what: '"' + q + '"', more: { label: 'See all results', href: '#/search/' + encodeURIComponent(q) }, ranked: e.cheap ? 'cheap' : 'match', search: true });
+          plans.push({ fetch: function () { return S.suggest(q).then(function (r) { return pageOfList(r.products || []); }); },
+            what: '"' + q + '"', more: { label: 'See all results', href: '#/search/' + encodeURIComponent(q) }, ranked: 'match', search: true });
+        }
+        if (e.brand && q && lower(q) !== lower(e.brand)) {
+          plans.push({ fetch: function (after) { return S.searchAll(e.brand, { after: after, sort: sort }); },
+            what: e.brand, more: { label: 'See all ' + e.brand, href: '#/brand/' + encodeURIComponent(e.brand) }, ranked: e.cheap ? 'cheap' : 'match', search: true, name: e.brand });
+        }
+        if (!plans.length) return null;
+
+        var seen = [];
+        var shown = null;    /* the most relevant source that had anything */
+        var failed = 0;
+        function attempt(i) {
+          if (i >= plans.length) {
+            if (failed === plans.length) return Promise.reject(new Error('store down'));
+            var about = shown || plans[0];
+            return Promise.resolve({ picks: [], seen: shown ? shown.seen : [], what: about.what, more: about.more, ranked: about.ranked, col: about.col || null, search: false, scored: false });
           }
-          return true;
-        };
-        return gather(source, keep, enough || 3).then(function (r) {
-          var picks = r.kept.slice();
-          if (search) {
-            /* Closest titles first; the store's order breaks ties. */
-            picks = picks.map(function (p, i) { return { p: p, s: N.titleScore(search, p.title) + sizeBonus(p, e.size), i: i }; })
-              .sort(function (a, b) { return b.s - a.s || a.i - b.i; })
-              .map(function (x) { x.p._score = x.s; return x.p; });
-          }
-          if (e.cheap) picks.sort(function (a, b) { return a.paise - b.paise; });
-          return { picks: picks, seen: r.seen, what: what, more: more, ranked: ranked, col: col, search: search };
-        });
+          var plan = plans[i];
+          return gather(plan.fetch, keeper(e, plan), enough || 3).then(function (r) {
+            r.seen.forEach(function (p) { seen.push(p); });
+            if (!shown && r.seen.length) shown = Object.assign({ seen: r.seen }, plan);
+            if (!r.kept.length) return attempt(i + 1);
+            return finish(plan, r.kept, seen, e);
+          }, function () { failed++; return attempt(i + 1); });
+        }
+        return attempt(0);
       });
+    }
+
+    function keeper(e, plan) {
+      return function (p) {
+        if (!p.available || !within(p, e.price)) return false;
+        /* A brand asked for, found by search: keep that brand only. */
+        if (e.brand && plan.search && p.brand && lower(p.brand) !== lower(e.brand) && lower(p.title).indexOf(lower(e.brand)) < 0) return false;
+        if (e.pet && !plan.col) {
+          var t = lower(p.title + ' ' + p.type);
+          var other = Object.keys(N.PETS).some(function (k) { return k !== e.pet.pet && N.PETS[k].some(function (w) { return t.indexOf(w) >= 0; }); });
+          if (other && !N.PETS[e.pet.pet].some(function (w) { return t.indexOf(w) >= 0; })) return false;
+        }
+        return true;
+      };
+    }
+
+    /** Ranks what was found. Words beyond the collection or brand name
+     *  ("acana PUPPY") decide the order; otherwise the store's own order
+     *  (best sellers) stands. */
+    function finish(plan, kept, seen, e) {
+      var nameWords = {};
+      N.tokens(plan.name || '').forEach(function (w) { nameWords[N.stem(w)] = true; });
+      if (e.brand) N.tokens(e.brand).forEach(function (w) { nameWords[N.stem(w)] = true; });
+      var extra = N.tokens(e.terms || '').filter(function (w) { return !nameWords[N.stem(w)] && !GENERIC[N.stem(w)]; }).join(' ');
+      var picks = kept.slice();
+      var scored = false;
+      if (extra || plan.search) {
+        var by = extra || e.terms || '';
+        if (by) {
+          scored = true;
+          picks = picks.map(function (p, i) { return { p: p, s: N.titleScore(by, p.title) + sizeBonus(p, e.size), i: i }; })
+            .sort(function (a, b) { return b.s - a.s || a.i - b.i; })
+            .map(function (x) { x.p._score = x.s; return x.p; });
+        }
+      }
+      if (e.cheap) picks.sort(function (a, b) { return a.paise - b.paise; });
+      return { picks: picks, seen: seen, what: plan.what, more: plan.more, ranked: plan.ranked, col: plan.col || null, search: plan.search ? (e.terms || plan.what) : false, scored: scored };
     }
 
     function sizeBonus(p, size) {
@@ -642,7 +729,7 @@
         if (!r.picks.length) return noneFound(r, e);
         /* A question about one product ("sizes of Acana puppy") gets that
          * product's sizes, prices and stock. */
-        if (r.search && N.RX.info.test(N.normalise(raw)) && r.picks[0]._score >= 1 && (!r.picks[1] || r.picks[1]._score < r.picks[0]._score)) {
+        if (r.scored && N.RX.info.test(N.normalise(raw)) && r.picks[0]._score >= 1 && (!r.picks[1] || r.picks[1]._score < r.picks[0]._score)) {
           return pick(r.picks[0].handle, { qty: e.qty, size: e.size }, true);
         }
         var picks = r.picks.slice(0, 3);
@@ -675,7 +762,7 @@
       if (e.which === 'it' && state.focus && !e.terms) return pick(state.focus.handle, want);
       if (!e.terms && !e.topic && !e.brand) {
         if (state.bagCount) return checkout();
-        state.pending = null;
+        state.pending = 'whatToBuy';
         return done([text('Happy to. What would you like to order? Tell me the product, brand or what it is for, like "Acana puppy 2kg" or "deworming for my dog".')],
           chips('deworm', 'bag'));
       }
@@ -684,7 +771,7 @@
         if (!r.picks.length) return noneFound(r, e);
         var top = r.picks[0];
         var clear = r.picks.length === 1 ||
-          (r.search && top._score >= 1 && (!r.picks[1] || r.picks[1]._score < top._score));
+          (r.scored && top._score >= 1 && (!r.picks[1] || r.picks[1]._score < top._score));
         if (clear) return pick(top.handle, want);
         state.shown = r.picks.slice(0, 4);
         state.want = want;
@@ -764,10 +851,11 @@
         state.pending = null;
         state.want = null;
         var name = (f ? f.title : 'It') + (v.title && v.title !== 'One size' && v.title !== 'Default Title' ? ' (' + v.title + ')' : '');
+        state.pending = 'more';
         return answer([
-          text('Added ' + (qty > 1 ? qty + ' x ' : '') + name + ' to your bag.'),
+          text('Added ' + (qty > 1 ? qty + ' x ' : '') + name + ' to your bag. Anything else you need?'),
           bagBlock(cart, true)
-        ], [CHIPS.checkout, { label: 'Add more of it', say: 'one more' }, { label: 'Find something else', say: 'I want to order something else' }]);
+        ], [{ label: 'No, that\'s all', act: { t: 'doneShopping' } }, { label: 'Add something else', say: 'I want to add something else' }, { label: 'One more of this', say: 'one more' }]);
       }).catch(function (err) {
         return answer([text((err && err.storefront && err.message) || 'I could not add that right now. Try again in a moment.')], chips('person'));
       });
@@ -830,7 +918,9 @@
       return work.then(function (cart) {
         remember(cart);
         if (!cart || !cart.lines.length) return answer([text((title ? 'Removed ' + title + '. ' : '') + 'Your bag is empty now.')], chips('shop'));
-        return answer([text(qty <= 0 ? 'Removed' + (title ? ' ' + title : '') + '.' : 'Updated' + (title ? ' ' + title : '') + ' to ' + qty + '.'), bagBlock(cart, true)], [CHIPS.checkout, CHIPS.bag]);
+        state.pending = 'more';
+        return answer([text((qty <= 0 ? 'Removed' + (title ? ' ' + title : '') + '.' : 'Updated' + (title ? ' ' + title : '') + ' to ' + qty + '.') + ' Anything else you need?'), bagBlock(cart, true)],
+          [{ label: 'No, that\'s all', act: { t: 'doneShopping' } }, { label: 'Add something else', say: 'I want to add something else' }, CHIPS.bag]);
       }).catch(function (err) {
         return answer([text((err && err.storefront && err.message) || 'I could not change the bag right now.')], chips('bag'));
       });
@@ -861,6 +951,7 @@
       var clean = {
         name: String(a.name || '').replace(/\s+/g, ' ').trim(), phone: String(a.phone || '').replace(/\D/g, '').slice(-10),
         email: String(a.email || '').trim().toLowerCase(), address1: String(a.address1 || '').trim(), address2: String(a.address2 || '').trim(),
+        landmark: String(a.landmark || '').trim(),
         zip: String(a.zip || '').replace(/\D/g, ''), city: String(a.city || '').trim(), state: String(a.state || '').toUpperCase()
       };
       if (!clean.state && clean.zip.length === 6 && shop.stateOfPin) clean.state = shop.stateOfPin(clean.zip) || '';
@@ -868,7 +959,8 @@
       if (clean.name.length < 2) err.name = 'Enter your full name.';
       if (!/^[6-9]\d{9}$/.test(clean.phone)) err.phone = 'Enter a 10 digit mobile number.';
       if (clean.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean.email)) err.email = 'Check the email address.';
-      if (clean.address1.length < 3) err.address1 = 'Enter the house, street or building.';
+      if (clean.address1.length < 2) err.address1 = 'Enter the house or flat number and building.';
+      if (clean.address2.length < 3) err.address2 = 'Enter the street or area.';
       if (!/^[1-9]\d{5}$/.test(clean.zip)) err.zip = 'Enter a 6 digit pincode.';
       if (clean.city.length < 2) err.city = 'Enter the town or city.';
       if (stateCodes().indexOf(clean.state) < 0) err.state = 'Choose the state.';
@@ -877,6 +969,8 @@
 
     function cartLines(cart) { return cart.lines.map(function (l) { return { variantId: l.variantId, qty: l.qty }; }); }
 
+    /** Checkout in the chat, one step at a time:
+     *  payment mode, then the full address, then the review with Pay. */
     function checkout() {
       return loadBag().then(function (cart) {
         if (!cart || !cart.lines.length) {
@@ -886,17 +980,63 @@
           state.pending = null;
           return answer([text('Your bag is empty. Tell me what you would like to order and I will add it.')], chips('deworm', 'shop'));
         }
-        var known = (state.co && state.co.address) || (shop.savedAddress && shop.savedAddress());
-        if (known && checkAddress(known).ok) {
-          state.pending = 'savedAddress';
-          state.co = { address: checkAddress(known).address };
-          return answer([text('Let\'s place your order: ' + itemWord(cart.count) + ', ' + money(cart.subtotalPaise) + ' before delivery. Deliver to this address?'),
-            { type: 'savedAddress', address: state.co.address }], []);
-        }
-        state.pending = 'address';
-        return answer([text('Let\'s place your order: ' + itemWord(cart.count) + ', ' + money(cart.subtotalPaise) + ' before delivery. Where should it go?'),
-          { type: 'address', prefill: known || {}, errors: {} }], []);
+        if (!state.co) state.co = {};
+        if (!state.co.payment) return askPayment(cart);
+        return askAddressStep(cart);
       }).catch(storeDown);
+    }
+
+    function askPayment(cart) {
+      return S.checkout('options', {}).then(function (o) {
+        if (o.configured === false) {
+          state.pending = null;
+          return answer([text('Ordering online is being switched on. Send your bag to our team on WhatsApp and they will confirm it with you.')]
+            .concat(contactBlocks('', 'Hi Paws and Tails, I would like to order:\n' + state.bagText)), []);
+        }
+        var codOk = o.cod && o.cod.enabled && (!o.cod.maxPaise || cart.subtotalPaise <= o.cod.maxPaise);
+        var codWhy = !o.cod || !o.cod.enabled ? 'Not offered right now' : codOk ? 'Pay when it arrives' : 'Available up to ' + money(o.cod.maxPaise);
+        state.co.options = { online: !!o.online, cod: !!codOk, codWhy: codWhy };
+        state.pending = 'payment';
+        return answer([
+          text('Great. Your bag has ' + itemWord(cart.count) + ', ' + money(cart.subtotalPaise) + ' before delivery. How would you like to pay?'),
+          { type: 'payChoice', online: !!o.online, cod: { allowed: !!codOk, why: codWhy } }
+        ], []);
+      });
+    }
+
+    function choosePayment(p) {
+      var co = state.co || (state.co = {});
+      var o = co.options;
+      if (!o) return checkout();
+      if (!p) p = o.online ? 'online' : 'cod';
+      if (p === 'online' && !o.online) { state.pending = 'payment'; return done([text('Online payment is not switched on yet. Cash on delivery is available.')], [{ label: 'Cash on delivery', act: { t: 'payMode', p: 'cod' } }]); }
+      if (p === 'cod' && !o.cod) { state.pending = 'payment'; return done([text('Cash on delivery: ' + o.codWhy + '. Pay online instead?')], o.online ? [{ label: 'Pay online', act: { t: 'payMode', p: 'online' } }] : []); }
+      co.payment = p;
+      if (co.quote) return quote();
+      return loadBag().then(function (cart) { return askAddressStep(cart); });
+    }
+
+    function askAddressStep(cart) {
+      var co = state.co;
+      var how = co.payment === 'cod' ? 'Cash on delivery it is.' : 'Paying online.';
+      var known = co.address || (shop.savedAddress && shop.savedAddress());
+      if (known && checkAddress(known).ok) {
+        state.pending = 'savedAddress';
+        co.address = checkAddress(known).address;
+        return answer([text(how + ' Deliver to this address?'), { type: 'savedAddress', address: co.address }], []);
+      }
+      state.pending = 'address';
+      return answer([text(how + ' Now the full delivery address:'), { type: 'address', prefill: known || {}, errors: {} }], []);
+    }
+
+    /* What the store's checkout takes: the area and landmark ride in the
+     * second address line. */
+    function forStore(a) {
+      var out = {};
+      Object.keys(a).forEach(function (k) { out[k] = a[k]; });
+      out.address2 = [a.address2, a.landmark ? 'near ' + a.landmark : ''].filter(Boolean).join(', ');
+      delete out.landmark;
+      return out;
     }
 
     function askAddress(prefill, errors, lead) {
@@ -908,7 +1048,9 @@
       var c = checkAddress(a);
       if (!c.ok) return askAddress(c.address, c.errors, 'A few details need fixing:');
       if (shop.keepAddress) shop.keepAddress(c.address);
-      state.co = { address: c.address };
+      if (!state.co) state.co = {};
+      state.co.address = c.address;
+      if (!state.co.payment) return checkout();
       return quote();
     }
 
@@ -916,7 +1058,7 @@
       var co = state.co;
       return loadBag().then(function (cart) {
         if (!cart || !cart.lines.length) { state.co = null; state.pending = null; return answer([text('Your bag is empty now.')], chips('shop')); }
-        return Promise.all([S.checkout('quote', { lines: cartLines(cart), address: co.address, rate: rate || co.rate }), terms()]).then(function (r) {
+        return Promise.all([S.checkout('quote', { lines: cartLines(cart), address: forStore(co.address), rate: rate || co.rate }), terms()]).then(function (r) {
           var q = r[0];
           if (q.configured === false) {
             state.pending = null;
@@ -931,11 +1073,12 @@
           }
           co.quote = q;
           co.rate = q.rate;
-          if (!co.payment || (co.payment === 'cod' && !q.cod.allowed) || (co.payment === 'online' && !q.online)) {
-            co.payment = q.online ? 'online' : q.cod.allowed ? 'cod' : null;
-          }
+          var switched = '';
+          if (co.payment === 'cod' && !q.cod.allowed && q.online) { co.payment = 'online'; switched = (q.cod.why || 'Cash on delivery is not available for this order.') + ' I have switched to paying online. '; }
+          if (co.payment === 'online' && !q.online && q.cod.allowed) { co.payment = 'cod'; switched = 'Online payment is not switched on yet, so this is cash on delivery. '; }
+          if (!co.payment) co.payment = q.online ? 'online' : q.cod.allowed ? 'cod' : null;
           co.eta = estimate(r[1], { start: now(), region: regionOfPin(co.address.zip), fallback: fallbackDays });
-          return summary('Please check and confirm. Nothing is charged until you tap the button.');
+          return summary(switched + 'Here is your order. Check it, then tap ' + (co.payment === 'cod' ? 'Place order' : 'Pay') + '. Nothing is charged until you do.');
         });
       }).catch(storeDown);
     }
@@ -949,7 +1092,10 @@
         type: 'summary', ref: co.ref, items: q.items, address: co.address, rates: q.rates, rate: co.rate, payment: co.payment,
         online: q.online, cod: q.cod, subtotal: q.subtotal, shipping: q.shipping, tax: q.tax, taxesIncluded: q.taxesIncluded,
         total: q.total, eta: co.eta ? fmtEta(co.eta) : ''
-      }], [{ label: 'Change address', act: { t: 'newAddress' } }, { label: 'Not now', act: { t: 'cancelCheckout' } }]);
+      }], [
+        /* The same button as in the card, always in reach above the box. */
+        { label: co.payment === 'cod' ? 'Place order ' + money(q.total) : 'Pay ' + money(q.total), act: { t: 'place', ref: co.ref }, primary: true },
+        { label: 'Change address', act: { t: 'newAddress' } }, { label: 'Not now', act: { t: 'cancelCheckout' } }]);
     }
 
     function setRate(handleOrSpeed) {
@@ -983,7 +1129,7 @@
       var q = co.quote;
       return loadBag().then(function (cart) {
         if (!cart || !cart.lines.length) { state.co = null; state.pending = null; return answer([text('Your bag is empty now.')], chips('shop')); }
-        return shop.place({ lines: cartLines(cart), address: co.address, rate: co.rate, payment: co.payment, expectTotal: q.total }).then(function (r) {
+        return shop.place({ lines: cartLines(cart), address: forStore(co.address), rate: co.rate, payment: co.payment, expectTotal: q.total }).then(function (r) {
           if (r && r.ok) {
             var o = r.order;
             state.pending = null;
@@ -1067,7 +1213,7 @@
         var e = r.entities;
         e._raw = raw;
         var intent = r.intent;
-        var keepPending = { checkout: 1, track: 1, reorder: 1, pickSize: 1, pickProduct: 1, confirmYes: 1, confirmNo: 1, setPayment: 1, setSpeed: 1, changeAddress: 1, useSaved: 1, emptyYes: 1, emptyNo: 1 };
+        var keepPending = { buy: 1, moreNo: 1, moreYes: 1, choosePayment: 1, checkout: 1, track: 1, reorder: 1, pickSize: 1, pickProduct: 1, confirmYes: 1, confirmNo: 1, setPayment: 1, setSpeed: 1, changeAddress: 1, useSaved: 1, emptyYes: 1, emptyNo: 1 };
         if (!keepPending[intent] && state.pending && state.pending !== 'confirm') state.pending = null;
         switch (intent) {
           case 'restart': reset(); return welcome();
@@ -1095,11 +1241,16 @@
           case 'emptyYes': return emptyBag(true);
           case 'emptyNo': state.pending = null; return answer([text('Okay, your bag stays as it is.')], [CHIPS.checkout]);
           case 'checkout': return checkout();
+          case 'moreNo': return checkout();
+          case 'moreYes': state.pending = 'whatToBuy';
+            return answer([text(state.bagCount ? 'Sure. What else would you like? Tell me the product or brand.' : 'Happy to help you order. What would you like? Tell me the product, brand or what it is for, like "Acana puppy 2kg".')],
+              state.bagCount ? [{ label: 'No, that\'s all', act: { t: 'doneShopping' } }, CHIPS.bag] : chips('deworm'));
+          case 'choosePayment': return choosePayment(e.payment);
           case 'useSaved': return state.co && state.co.address ? useAddress(state.co.address) : checkout();
           case 'changeAddress': return askAddress((state.co && state.co.address) || (shop.savedAddress && shop.savedAddress()) || {}, {}, 'Where should it go instead?');
           case 'confirmYes': return place(null);
           case 'confirmNo': return cancelCheckout();
-          case 'setPayment': return setPayment(e.payment);
+          case 'setPayment': return state.pending === 'payment' || !(state.co && state.co.quote) ? choosePayment(e.payment) : setPayment(e.payment);
           case 'setSpeed': return setRate(e.speed);
           case 'product': return products(e, raw);
           case 'yesNo':
@@ -1124,6 +1275,8 @@
         case 'remove': return setLine(a.line, 0, a.title);
         case 'bag': return showBag();
         case 'checkout': return checkout();
+        case 'doneShopping': return checkout();
+        case 'payMode': return choosePayment(a.p);
         case 'useSaved': return state.co && state.co.address ? useAddress(state.co.address) : checkout();
         case 'newAddress': return askAddress((state.co && state.co.address) || (shop.savedAddress && shop.savedAddress()) || {}, {}, 'Where should it go?');
         case 'address': return useAddress(a.a);

@@ -106,9 +106,9 @@ async function waitPictures(page, scope) {
     ok('best sellers come from the whole store', (await page.locator('#railBest .tile').count()) > 0);
     await page.waitForSelector('#homeCols .shelfcard', { timeout: 10000 });
     eq('the front page shows the first twelve collections', await page.locator('#homeCols .shelfcard').count(), 12);
-    ok('the rest are behind a + expander', /Show all 22 collections/.test(await page.locator('[data-act="moreCols"]').textContent()));
+    ok('the rest are behind a + expander', /Show all 24 collections/.test(await page.locator('[data-act="moreCols"]').textContent()));
     await page.locator('[data-act="moreCols"]').click();
-    eq('opening it shows every collection the store has with products', await page.locator('#homeCols .shelfcard').count(), 22);
+    eq('opening it shows every collection the store has with products', await page.locator('#homeCols .shelfcard').count(), 24);
     const titles = await page.locator('#homeCols .shelfcard b').allTextContents();
     ok('the system home collection is hidden', titles.indexOf('Home page') < 0);
     ok('an empty collection is left out', titles.indexOf('Retired range') < 0);
@@ -119,7 +119,7 @@ async function waitPictures(page, scope) {
     section('collections menu');
     await page.locator('#megaBtn').click();
     await page.waitForSelector('.mega ul a');
-    eq('the menu lists the live collections', await page.locator('.mega ul a').count(), 22);
+    eq('the menu lists the live collections', await page.locator('.mega ul a').count(), 24);
     await page.locator('.mega ul a', { hasText: 'Dog Food' }).first().click();
     await page.waitForSelector('#listGrid .tile', { timeout: 10000 });
     eq('a collection opens with the store title', await page.locator('#listTitle').textContent(), 'Dog Food');
@@ -213,7 +213,7 @@ async function waitPictures(page, scope) {
     ok('and everything it found is that brand', brands.length > 0 && brands.every((b) => b.toLowerCase() === brand.toLowerCase()));
     ok('no tile shows the store\'s own name as the brand', brands.every((b) => !/paws/i.test(b)));
     await page.goto(BASE + '/#/brand/' + encodeURIComponent(brand), { waitUntil: 'networkidle' });
-    await page.waitForSelector('#listGrid .tile', { timeout: 10000 });
+    await page.waitForFunction((b) => (document.getElementById('listTitle') || {}).textContent === b && document.querySelector('#listGrid .tile .brand'), brand, { timeout: 10000 });
     const onPage = await page.locator('#listGrid .tile .brand').allTextContents();
     eq('a brand page lists that brand, read from titles', [onPage.length > 0, onPage.every((b) => b === brand)], [true, true]);
 
@@ -528,9 +528,17 @@ async function waitPictures(page, scope) {
       if (await page.locator('.cl-panel').isHidden()) await page.locator('.cl-launch').click();
       const placedBefore = mock.admin.placed.length;
 
+      /* As strict as the live store might be: brand and title queries
+       * answer nothing. The assistant must still find Acana. */
+      mock.strict.fieldQueries = true;
+      await chatSay('i want to buy acana');
+      const names0 = await page.locator('.cl-row.bot').last().locator('.cprod .cp-name').allTextContents();
+      ok('"i want to buy acana" finds Acana even when brand queries answer nothing (' + names0.length + ')', names0.length >= 2 && names0.every((t) => /^Acana /.test(t)));
       await chatSay('can you place an order for acana');
       const names = await page.locator('.cl-row.bot').last().locator('.cprod .cp-name').allTextContents();
       ok('the request from the screenshot finds Acana (' + names.length + ')', names.length >= 2 && names.every((t) => /^Acana /.test(t)));
+      const brandTiles = await page.locator('.cl-row.bot').last().locator('.cprod small').allTextContents();
+      ok('the cards show the brand, not the store\'s name', brandTiles.every((t) => t === 'Acana'));
       await chatTap(page.locator('.cl-row.bot').last().locator('.cprod .cp-add').nth(1));
       ok('Choose size shows the sizes in the chat', (await page.locator('.cl-detail:not(.used) .cd-size').count()) >= 2);
       await chatTap(page.locator('.cl-detail:not(.used) .cd-size').nth(1));
@@ -539,14 +547,22 @@ async function waitPictures(page, scope) {
       await chatSay('make it 2');
       eq('"make it 2" updates the header count too', Number(await page.locator('.pip').textContent()), 2);
 
-      await chatTap(page.locator('.cl-chip', { hasText: 'Checkout' }));
-      ok('Checkout opens an address form in the chat', (await page.locator('.cl-addr:not(.used)').count()) === 1);
+      mock.strict.fieldQueries = false;
+      ok('after adding, it asks if anything else is needed', /Anything else you need\?/.test(await page.locator('.cl-log').textContent()));
+      await chatTap(page.locator('.cl-chip', { hasText: 'No, that\'s all' }));
+      ok('"No, that\'s all" asks how to pay, with both ways as buttons', (await page.locator('.cl-paychoice:not(.used) .pc-opt').count()) === 2);
+      await chatTap(page.locator('.cl-paychoice:not(.used) .pc-opt', { hasText: 'Cash on delivery' }));
+      ok('the payment buttons stop working once chosen', await page.locator('.cl-paychoice.used .pc-opt').first().isDisabled());
+      ok('then the full address form, in the chat', (await page.locator('.cl-addr:not(.used)').count()) === 1);
+      ok('with street or area and a landmark', (await page.locator('.cl-addr:not(.used) [name=address2]').count()) === 1 && (await page.locator('.cl-addr:not(.used) [name=landmark]').count()) === 1);
       await chatTap(page.locator('.cl-addr:not(.used) .ca-go'));
       ok('Continue with nothing filled in marks what is missing', (await page.locator('.cl-addr:not(.used) .ca-f.bad').count()) >= 5);
       const f = page.locator('.cl-addr:not(.used)');
       await f.locator('[name=name]').fill('Asha Rao');
       await f.locator('[name=phone]').fill('98450 12345');
-      await f.locator('[name=address1]').fill('12 Temple Road');
+      await f.locator('[name=address1]').fill('Flat 4, Lake View');
+      await f.locator('[name=address2]').fill('Temple Road');
+      await f.locator('[name=landmark]').fill('Krishna Temple');
       await f.locator('[name=zip]').fill('576101');
       eq('the pincode fills the state', await f.locator('[name=state]').inputValue(), 'KA');
       await f.locator('[name=city]').fill('Udupi');
@@ -562,10 +578,11 @@ async function waitPictures(page, scope) {
       const sum2 = page.locator('.cl-sum:not(.used)');
       ok('choosing express re-prices it', (await sum2.locator('.grand .mono').textContent()) !== total1);
       ok('and the old summary can no longer be used', await page.locator('.cl-sum.used .cs-place').first().isDisabled());
-      await chatTap(sum2.locator('.co-opt', { hasText: 'Cash on delivery' }));
-      ok('the button says what will happen', /on delivery/.test(await page.locator('.cl-sum:not(.used) .cs-place').textContent()));
+      ok('cash on delivery, as chosen before the address', /on delivery/.test(await page.locator('.cl-sum:not(.used) .cs-place').textContent()));
+      ok('the address shows the landmark', /near Krishna Temple/.test(await page.locator('.cl-sum:not(.used) .cs-addr').textContent()));
+      ok('the same button sits above the message box, with the total', /Place order ₹/.test(await page.locator('.cl-chip.primary').textContent()));
       eq('nothing is placed before the button', mock.admin.placed.length, placedBefore);
-      await chatTap(page.locator('.cl-sum:not(.used) .cs-place'));
+      await chatTap(page.locator('.cl-chip.primary'));
       await page.waitForSelector('.cl-placed', { timeout: 15000 });
       const placedName = mock.admin.placed[mock.admin.placed.length - 1].name;
       ok('the order is placed, in the chat', new RegExp(placedName).test(await page.locator('.cl-placed').last().textContent()));
@@ -575,7 +592,8 @@ async function waitPictures(page, scope) {
 
       const one = products.find((p) => p.availableForSale && p.variants.length === 1);
       await chatSay('buy ' + one.title);
-      await chatTap(page.locator('.cl-chip', { hasText: 'Checkout' }));
+      await chatTap(page.locator('.cl-chip', { hasText: 'No, that\'s all' }));
+      await chatTap(page.locator('.cl-paychoice:not(.used) .pc-opt', { hasText: 'Pay online' }));
       ok('next time the address is offered as saved', (await page.locator('.cl-saved:not(.used)').count()) === 1);
       await chatTap(page.locator('.cl-saved:not(.used) .cs-yes'));
       await page.locator('.cl-sum:not(.used) .cs-place').click();
@@ -601,7 +619,7 @@ async function waitPictures(page, scope) {
     ok('phone suggestion rows use the width of the screen (' + phoneRows.join(',') + ')', phoneRows.every((w) => w >= 300));
     await page.locator('.burger').click();
     await page.waitForSelector('.sheet nav a');
-    ok('the menu lists the live collections', (await page.locator('.sheet nav a[href^="#/c/"]').count()) === 22);
+    ok('the menu lists the live collections', (await page.locator('.sheet nav a[href^="#/c/"]').count()) === 24);
     await page.goto(BASE + '/#/all', { waitUntil: 'networkidle' });
     await page.waitForSelector('#listGrid .tile');
     await waitPictures(page, '#listGrid .tile .shot img');

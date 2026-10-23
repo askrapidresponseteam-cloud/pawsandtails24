@@ -214,7 +214,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
   }
   const buyer = (shop) => { S.forgetCart(); return A.create({ S: S, C: C, collections: cols, now: () => thu, shop: shop }); };
   const blockOf = (r, type) => r.blocks.find((b) => b.type === type) || null;
-  const ADDR = { name: 'Asha Rao', phone: '98450 12345', address1: '12 Temple Road', zip: '576101', city: 'Udupi' };
+  const ADDR = { name: 'Asha Rao', phone: '98450 12345', address1: 'Flat 4, Lake View', address2: 'Temple Road', landmark: 'Krishna Temple', zip: '576101', city: 'Udupi' };
   const acana = mock.products.filter((p) => p.brand === 'Acana' && p.availableForSale);
 
   section('ordering in the chat: the request from the screenshot');
@@ -231,36 +231,95 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     r = await bot.reply('1 kg');
     const v1kg = acana.find((p) => p.handle === choices[1].handle).variants.find((v) => v.title === '1 kg');
     ok('"1 kg" puts that size in the bag', /Added .*\(1 kg\) to your bag/.test(textOf(r)) && blockOf(r, 'bag').count === 1);
+    ok('and asks if anything else is needed', /Anything else you need\?/.test(textOf(r)) && r.chips.some((c) => c.act && c.act.t === 'doneShopping'));
     ok('and tells the page the bag changed', shop.calls.setCart > 0);
     r = await bot.reply('make it 2');
     eq('"make it 2" changes the quantity of what was just added', [blockOf(r, 'bag').count, blockOf(r, 'bag').subtotal], [2, Math.round(Number(v1kg.price.amount) * 100) * 2]);
-    r = await bot.reply('checkout');
-    ok('checkout asks where it should go', blockOf(r, 'address') && /Where should it go/.test(textOf(r)));
+    const other = mock.products.find((p) => p.availableForSale && p.variants.length === 1 && p.brand !== 'Acana');
+    r = await bot.reply('also add ' + other.title);
+    ok('"also add ..." while asked for more adds a second item and asks again', blockOf(r, 'bag').lines.length === 2 && /Anything else/.test(textOf(r)));
+    r = await bot.reply('no, that\'s all');
+    const pc = blockOf(r, 'payChoice');
+    ok('"no, that\'s all" asks how to pay', pc && /How would you like to pay/.test(textOf(r)));
+    ok('online and cash on delivery both offered', pc.online === true && pc.cod.allowed === true);
+    eq('nothing is priced yet', shop.calls.place, 0);
+    r = await bot.reply('cash on delivery');
+    ok('choosing cash on delivery asks for the full address', blockOf(r, 'address') && /Cash on delivery it is/.test(textOf(r)) && /full delivery address/.test(textOf(r)));
     r = await bot.act({ t: 'address', a: { name: 'A', phone: '123', address1: '', zip: '12', city: '' } });
     const errs = blockOf(r, 'address').errors;
-    eq('a bad address comes back with each problem named', Object.keys(errs).sort(), ['address1', 'city', 'name', 'phone', 'state', 'zip']);
+    eq('a bad address comes back with each problem named, street or area included', Object.keys(errs).sort(), ['address1', 'address2', 'city', 'name', 'phone', 'state', 'zip']);
     eq('and nothing is priced or placed', shop.calls.place, 0);
     r = await bot.act({ t: 'address', a: ADDR });
     const sum = blockOf(r, 'summary');
     ok('a good address gives the order summary, priced by the store', sum && sum.total > 0 && sum.rates.length === 2);
     ok('the state was worked out from the pincode', sum.address.state === 'KA');
-    ok('it says nothing is charged until the button', /Nothing is charged until you tap/.test(textOf(r)));
+    ok('it says nothing is charged until the button', /Nothing is charged until you do/.test(textOf(r)));
+    eq('the payment chosen earlier is kept', sum.payment, 'cod');
+    ok('the landmark is kept', sum.address.landmark === 'Krishna Temple');
+    const payChip = r.chips[0];
+    ok('the Place order button is also first among the replies, with the total', payChip && payChip.primary && payChip.act.t === 'place' && payChip.act.ref === sum.ref && new RegExp('Place order').test(payChip.label));
     eq('and nothing has been placed yet', shop.calls.place, 0);
     r = await bot.reply('express');
     const sum2 = blockOf(r, 'summary');
     ok('"express" re-prices with express delivery', sum2.rate === 'mock-express' && sum2.total === sum.total + 14900 - sum.shipping);
+    r = await bot.reply('pay online');
+    eq('"pay online" in the review switches the payment', blockOf(r, 'summary').payment, 'online');
     r = await bot.reply('cash on delivery');
-    eq('"cash on delivery" switches the payment', blockOf(r, 'summary').payment, 'cod');
+    eq('and back to cash on delivery', blockOf(r, 'summary').payment, 'cod');
+    const sum3 = blockOf(r, 'summary');
     r = await bot.act({ t: 'place', ref: sum.ref });
     ok('an out of date summary cannot place the order', /out of date/.test(textOf(r)) && shop.calls.place === 0);
     r = await bot.reply('yes');
     const placed = blockOf(r, 'placed');
     ok('"yes" places it', placed && /^#\d+$/.test(placed.order.name));
-    eq('for the total that was shown, cash on delivery', [placed.order.total, placed.order.payment, shop.calls.last.expectTotal], [blockOf(await Promise.resolve({ blocks: [sum2] }), 'summary').total, 'cod', sum2.total]);
+    eq('for the total that was shown, cash on delivery', [placed.order.total, placed.order.payment, shop.calls.last.expectTotal], [sum3.total, 'cod', sum3.total]);
     const inStore = mock.admin.placed[mock.admin.placed.length - 1];
-    eq('the store has it, payment pending, with what was chosen', [inStore.name, inStore.displayFinancialStatus, inStore.lineItems.nodes[0].quantity], [placed.order.name, 'PENDING', 2]);
+    eq('the store has it, payment pending, with what was chosen', [inStore.name, inStore.displayFinancialStatus, inStore.lineItems.nodes[0].quantity, inStore.lineItems.nodes.length], [placed.order.name, 'PENDING', 2, 2]);
+    eq('with the full address: street, area and landmark', shop.calls.last.address.address2, 'Temple Road, near Krishna Temple');
     r = await bot.reply('where is my order');
     ok('"where is my order" then knows which one', blockOf(r, 'order') && blockOf(r, 'order').order.name === placed.order.name);
+  }
+
+  section('a store that answers brand and title queries with nothing');
+  {
+    mock.strict.fieldQueries = true;
+    S.clearCache(); /* nothing remembered from before the store got strict */
+    const bot = buyer(shopFor());
+    let r = await bot.reply('i want to buy acana');
+    const found = cardsOf(r);
+    ok('"i want to buy acana" still finds Acana, from the store\'s own Acana collection', found.length >= 2 && found.every((p) => /^Acana /.test(p.title)));
+    ok('and asks which one', /Which Acana/.test(textOf(r)));
+    const viaCol = r.blocks.find((b) => b.type === 'products').more;
+    eq('with a link to that collection', viaCol && viaCol.href, '#/c/acana');
+    r = await bot.reply('i want to buy acana dog food');
+    ok('"acana dog food" names the "Acana Dog Food" collection', /Acana Puppy Food/.test(textOf(r) + JSON.stringify(r.blocks)));
+    r = await bot.reply('order orijen');
+    const orijen = cardsOf(r);
+    ok('a brand with no collection is found by the store\'s search instead', orijen.length >= 1 && orijen.every((p) => /^Orijen /.test(p.title)));
+    r = await bot.reply('acanna');
+    ok('a typo of the brand still lands', cardsOf(r).length > 0 && cardsOf(r).every((p) => /^Acana /.test(p.title)));
+    const page = await S.brandPage('Orijen');
+    ok('brand pages fall back to search too', page.products.length > 0 && page.products.every((p) => p.brand === 'Orijen') && page.via === 'search');
+    mock.strict.fieldQueries = false;
+  }
+
+  section('the context of buying');
+  {
+    const bot = buyer(shopFor());
+    let r = await bot.reply('I want to order something');
+    ok('"I want to order something" asks what, and does not search for "something"', /What would you like/.test(textOf(r)) && !cardsOf(r).length);
+    r = await bot.reply('acana puppy 250g');
+    ok('the product named next goes straight into the bag, in that size', /Added Acana Puppy .*\(250 g\) to your bag\. Anything else you need\?/.test(textOf(r)));
+    r = await bot.reply('I want to add something else');
+    ok('"add something else" asks what, without checking out', /What else would you like/.test(textOf(r)) && !blockOf(r, 'payChoice'));
+    r = await bot.reply('drools all medicines everyday pack 250 g');
+    ok('a brand with generic words is that brand, added straight away', /Added Drools All Medicines everyday pack \(250 g\)/.test(textOf(r)) && blockOf(r, 'bag').lines.length === 2);
+    r = await bot.reply('one more');
+    ok('"one more" adds another of the last item and asks again', blockOf(r, 'bag').count === 3 && /Anything else/.test(textOf(r)));
+    r = await bot.reply('no');
+    ok('"no" moves on to how to pay', !!blockOf(r, 'payChoice'));
+    r = await bot.reply('cash on delivery');
+    ok('then the full address', !!blockOf(r, 'address'));
   }
 
   section('paying online in the chat');
@@ -271,10 +330,13 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     let r = await bot.reply('buy 2 ' + one.title);
     ok('a clear match with one size goes straight into the bag, with the quantity', /Added 2 x/.test(textOf(r)) && blockOf(r, 'bag').count === 2);
     r = await bot.reply('checkout');
-    ok('a saved address is offered first', blockOf(r, 'savedAddress') && blockOf(r, 'savedAddress').address.name === 'Asha Rao');
+    ok('"checkout" goes straight to how to pay', !!blockOf(r, 'payChoice'));
+    r = await bot.act({ t: 'payMode', p: 'online' });
+    ok('then a saved address is offered first', blockOf(r, 'savedAddress') && blockOf(r, 'savedAddress').address.name === 'Asha Rao' && /Paying online/.test(textOf(r)));
     r = await bot.reply('yes');
     const sum = blockOf(r, 'summary');
-    eq('online payment is the default when Razorpay is on', sum.payment, 'online');
+    eq('online payment, as chosen', sum.payment, 'online');
+    ok('the button says Pay with the total', /^Pay /.test(r.chips[0].label));
     r = await bot.act({ t: 'place', ref: sum.ref });
     const placed = blockOf(r, 'placed');
     ok('paid and placed', placed && placed.order.payment === 'online' && /^Paid/.test(textOf(r)));
@@ -290,6 +352,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     const one = mock.products.find((p) => p.availableForSale && p.variants.length === 1);
     await bot.reply('buy ' + one.title);
     await bot.reply('checkout');
+    await bot.reply('pay online');
     let r = await bot.reply('yes');
     const sum = blockOf(r, 'summary');
     const before = mock.admin.placed.length;
@@ -327,7 +390,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     r = await bot.reply('#1001');
     ok('then for its phone or email', /phone number or email/.test(textOf(r)));
     r = await bot.reply('asha@example.com');
-    ok('puts its items back in the bag and heads to checkout', /Added 2 of 2 items from #1001/.test(textOf(r)) && blockOf(r, 'savedAddress'));
+    ok('puts its items back in the bag and heads to checkout', /Added 2 of 2 items from #1001/.test(textOf(r)) && blockOf(r, 'payChoice'));
   }
 
   section('a person, with the conversation');
@@ -353,9 +416,13 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     ok('a stray "yes" is answered', r.blocks.length > 0);
     r = await bot.reply('qwzx plorb');
     ok('nonsense is answered with a way forward', r.chips.length > 0);
-    const down = A.create({ S: Object.assign({}, S, { searchAll: () => Promise.reject(new Error('down')), cartId: () => null }), C: C, collections: cols });
+    const fail = () => Promise.reject(new Error('down'));
+    const partly = A.create({ S: Object.assign({}, S, { searchAll: fail, cartId: () => null }), C: C, collections: cols });
+    r = await partly.reply('buy acana puppy');
+    ok('one source down: the others still find it', cardsOf(r).length > 0 || !!blockOf(r, 'detail') || /Added/.test(textOf(r)));
+    const down = A.create({ S: Object.assign({}, S, { searchAll: fail, brandPage: fail, collectionPage: fail, suggest: fail, cartId: () => null }), C: C, collections: cols });
     r = await down.reply('buy acana puppy');
-    ok('the store not answering is a polite answer, not a crash', /could not reach the store/i.test(textOf(r)));
+    ok('the store not answering at all is a polite answer, not a crash', /could not reach the store/i.test(textOf(r)));
   }
 
   section('before tracking is connected');

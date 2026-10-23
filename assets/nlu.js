@@ -394,7 +394,8 @@
     'checkout again same also just only now today please kindly sir madam hi hello hey yes no ok okay pls ' +
     'them those these where when arrive talk person start track cancel reorder deliver make change set update increase reduce more less ' +
     'remove delete empty clear does come thanks thank bye sure express standard cash delivery online cod upi card pay payment them ' +
-    'ka ki ke se hai do does did kindly want wanted need needed help could if tomorrow week soon').split(' ');
+    'ka ki ke se hai do does did kindly want wanted need needed help could if tomorrow week soon ' +
+    'something anything else stuff things thing items item also too another other few couple').split(' ');
 
   /** What to search the catalogue for, once steering words are gone. */
   function searchTerms(text) {
@@ -457,6 +458,18 @@
       if (e.payment && !productWords) return 'setPayment';
       if (e.speed && !productWords) return 'setSpeed';
     }
+    /* The assistant asked what to buy: the next product named is the order. */
+    if ((p === 'whatToBuy' || p === 'more') && (productWords || e.which !== null || e.size) && !RX.track.test(t) && !RX.human.test(t) &&
+        !RX.returns.test(t) && !RX.bagShow.test(t) && !RX.bagRemove.test(t) && !(e.yesNo === 'no' && !productWords) &&
+        !/\b(that'?s (all|it)|nothing (else|more)|done|checkout|check out)\b/.test(t) && !RX.bagQty.test(t)) return 'buy';
+    if (p === 'more') {
+      if (/\b(that'?s (all|it)|thats (all|it)|that is (all|it)|nothing (else|more)|no more|done|finish(ed)?|proceed|checkout|check out|place (the |my )?order|pay( now)?|go to (pay|payment|checkout)|i'?m done|enough)\b/.test(t) || (e.yesNo === 'no' && !productWords)) return 'moreNo';
+      if (e.yesNo === 'yes' && !productWords) return 'moreYes';
+    }
+    if (p === 'payment') {
+      if (e.payment) return 'choosePayment';
+      if (/\b(first|1st|online|pay now)\b/.test(t)) return 'choosePayment';
+    }
     if (p === 'savedAddress') {
       if (e.yesNo === 'yes' || /\b(use (this|that|it)|same address|this address)\b/.test(t)) return 'useSaved';
       if (e.yesNo === 'no' || /\b(change|different|new|another)\b/.test(t)) return 'changeAddress';
@@ -471,6 +484,8 @@
     if (p === 'pickProduct' && (e.which !== null && e.which !== 'it' || (e.cheap && !e.terms)) && !RX.track.test(t)) return 'pickProduct';
 
     if (RX.help.test(t)) return 'help';
+    /* "Add something else", "order something": wants to shop, has not said what. */
+    if (/\b(something|anything|more stuff|more things)\b/.test(t) && (RX.buy.test(t) || /\bwant|need\b/.test(t)) && !productWords && !e.orderNo) return 'moreYes';
     var plain = ws.length <= 5 && !e.brand && !e.topic && !hasPrice && !e.orderNo;
     if (plain && RX.greet.test(t)) return 'greet';
     if (plain && RX.bye.test(t)) return 'bye';

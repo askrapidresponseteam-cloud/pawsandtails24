@@ -2,6 +2,7 @@
  * Checkout on pawsandtails24.vercel.app
  * ============================================================================
  * POST /api/checkout with { action, ... }:
+ *   options  {}                                              payment ways on offer
  *   quote    { lines, address, rate }                        price the bag
  *   place    { lines, address, rate, payment, expectTotal }  cod or online
  *   confirm  { razorpay_order_id, razorpay_payment_id, razorpay_signature }
@@ -31,6 +32,12 @@ function createHandler(opts) {
     if (!allow(String(ip || 'unknown'))) return { status: 429, body: { ok: false, error: 'Too many tries. Wait a minute and try again.' } };
     const action = body && body.action;
     try {
+      /* What can be offered before there is an address: online payment (are
+       * Razorpay keys set) and cash on delivery (on, and its cap). */
+      if (action === 'options') {
+        const conf = (opts.catalogue || C).checkout || {};
+        return { status: 200, body: { ok: true, online: razorpay.configured(), cod: { enabled: conf.cod !== false, maxPaise: conf.codMaxRupees ? conf.codMaxRupees * 100 : null } } };
+      }
       if (action === 'quote') return { status: 200, body: await checkout.quote(body) };
       if (action === 'place') return { status: 200, body: await checkout.place(body) };
       if (action === 'confirm') return { status: 200, body: await checkout.confirm(body) };

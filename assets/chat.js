@@ -241,8 +241,9 @@
     return '<form class="cl-card cl-addr" data-once="address" novalidate>' +
       field('name', 'Full name', a.name, { auto: 'name', max: 80, wide: true, err: e.name }) +
       field('phone', 'Mobile', a.phone, { prefix: '+91', mode: 'numeric', auto: 'tel-national', max: 14, wide: true, err: e.phone }) +
-      field('address1', 'House, street, building', a.address1, { auto: 'address-line1', max: 120, wide: true, err: e.address1 }) +
-      field('address2', 'Area, landmark', a.address2, { auto: 'address-line2', max: 120, wide: true, optional: true }) +
+      field('address1', 'House or flat no., building', a.address1, { auto: 'address-line1', max: 120, wide: true, err: e.address1 }) +
+      field('address2', 'Street, area or locality', a.address2, { auto: 'address-line2', max: 120, wide: true, err: e.address2 }) +
+      field('landmark', 'Landmark', a.landmark, { max: 80, wide: true, optional: true }) +
       field('zip', 'Pincode', a.zip, { mode: 'numeric', auto: 'postal-code', max: 6, err: e.zip }) +
       field('city', 'Town or city', a.city, { auto: 'address-level2', max: 60, err: e.city }) +
       '<label class="ca-f wide' + (e.state ? ' bad' : '') + '"><span>State</span><select name="state" autocomplete="address-level1"><option value="">Choose</option>' + states + '</select>' +
@@ -254,7 +255,8 @@
 
   function addressLine(a) {
     var st = (C.states || []).filter(function (s) { return s[0] === a.state; })[0];
-    return esc(a.address1) + (a.address2 ? ', ' + esc(a.address2) : '') + ', ' + esc(a.city) + ' ' + esc(a.zip) + (st ? ', ' + esc(st[1]) : '');
+    return esc(a.address1) + (a.address2 ? ', ' + esc(a.address2) : '') + (a.landmark ? ', near ' + esc(a.landmark) : '') +
+      ', ' + esc(a.city) + ' ' + esc(a.zip) + (st ? ', ' + esc(st[1]) : '');
   }
 
   function savedAddressHtml(b) {
@@ -262,6 +264,17 @@
     return '<div class="cl-card cl-saved" data-once="address">' +
       '<div class="cs-a"><b>' + esc(a.name) + '</b>, +91 ' + esc(a.phone) + '<br>' + addressLine(a) + '</div>' +
       '<div class="cs-b">' + actBtn('cs-yes', 'Deliver here', { t: 'useSaved' }) + actBtn('cs-no', 'Use a different address', { t: 'newAddress' }) + '</div>' +
+    '</div>';
+  }
+
+  function payChoiceHtml(b) {
+    var opt = function (on, label, sub, action, said) {
+      return on ? actBtn('pc-opt', '<b>' + label + '</b><small>' + esc(sub) + '</small>', action, said)
+        : '<span class="pc-opt off"><b>' + label + '</b><small>' + esc(sub) + '</small></span>';
+    };
+    return '<div class="cl-card cl-paychoice" data-once="payChoice">' +
+      opt(b.online, 'Pay online', b.online ? 'UPI, cards, netbanking, wallets' : 'Not switched on yet', { t: 'payMode', p: 'online' }, 'Pay online') +
+      opt(b.cod.allowed, 'Cash on delivery', b.cod.why, { t: 'payMode', p: 'cod' }, 'Cash on delivery') +
     '</div>';
   }
 
@@ -315,6 +328,7 @@
     if (b.type === 'address') return addressHtml(b);
     if (b.type === 'savedAddress') return savedAddressHtml(b);
     if (b.type === 'summary') return summaryHtml(b);
+    if (b.type === 'payChoice') return payChoiceHtml(b);
     if (b.type === 'placed') return placedHtml(b);
     if (b.type === 'order') return '<div class="cl-order">' + APP.orderCardHtml(b.order, b.eta, true) + '</div>';
     if (b.type === 'links') return '<div class="cl-links">' + b.links.map(linkHtml).join('') + '</div>';
@@ -334,7 +348,7 @@
 
   function answer(res) {
     var kinds = (res.blocks || []).map(function (b) { return b.type === 'savedAddress' ? 'address' : b.type; });
-    retire(['summary', 'address', 'detail', 'bag'].filter(function (k) { return kinds.indexOf(k) >= 0; }).concat(kinds.indexOf('placed') >= 0 ? ['summary', 'address', 'bag'] : []));
+    retire(['summary', 'address', 'detail', 'bag', 'payChoice'].filter(function (k) { return kinds.indexOf(k) >= 0; }).concat(kinds.indexOf('placed') >= 0 ? ['summary', 'address', 'bag'] : []));
     var first = null;
     (res.blocks || []).forEach(function (b) {
       var html = blockHtml(b);
@@ -343,7 +357,7 @@
     });
     ui.chips.innerHTML = (res.chips || []).map(function (c) {
       if (c.href) return '<a class="cl-chip" href="' + esc(c.href) + '" data-chat="nav">' + esc(c.label) + '</a>';
-      if (c.act) return actBtn('cl-chip', esc(c.label), c.act, c.label);
+      if (c.act) return actBtn('cl-chip' + (c.primary ? ' primary' : ''), esc(c.label), c.act, c.label);
       return '<button class="cl-chip" type="button" data-say="' + esc(c.say) + '">' + esc(c.label) + '</button>';
     }).join('');
     /* A long answer (a summary, a form) opens at its start, so it is read
@@ -435,7 +449,7 @@
     e.stopPropagation();
     if (f.classList.contains('used')) return;
     var a = {};
-    ['name', 'phone', 'address1', 'address2', 'zip', 'city', 'state', 'email'].forEach(function (k) {
+    ['name', 'phone', 'address1', 'address2', 'landmark', 'zip', 'city', 'state', 'email'].forEach(function (k) {
       var el = f.querySelector('[name="' + k + '"]');
       a[k] = el ? el.value.trim() : '';
     });

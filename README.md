@@ -17,6 +17,12 @@ store's admin like any other, paid online with Razorpay or cash on delivery.
 
 ## Live
 
+**Which version is live:** the footer says "Build 9" (small, after the
+domain), and `node test/check-live.js` prints the live build next to the one
+in your folder. Each release bumps the number in `index.html` (`pt-build`
+and the `?v=` on every script and stylesheet), so browsers always load the
+new files together.
+
 Deployed on Vercel at https://pawsandtails24.vercel.app. `vercel.json` forwards
 `/api/<version>/graphql.json` to the store, which is what lets the browser read
 it. The store answers without a key (tokenless access), so nothing else is
@@ -181,14 +187,22 @@ orders through the same checkout as the checkout page.
 
 **What it does**
 
-- **Takes orders.** "Can you place an order for Acana", "buy 2 bags of
-  Acana puppy 2kg", "add the second one". It finds the product, asks the
-  size only when needed (or takes "2kg", "the smallest"), adds it to the
-  bag, and on "checkout" takes the address (or offers the saved one), shows
-  the summary with the store's delivery options and expected date, total,
-  and payment choice, and places the order **only when the shopper taps
-  Place order or says yes to that exact total**. Online payment opens
-  Razorpay over the chat; cash on delivery places it at once.
+- **Takes orders, one step at a time.**
+  1. "I want to buy Acana", "buy 2 bags of Acana puppy 2kg", or "I want to
+     order something" and then the product. It finds it, asks the size only
+     when needed ("2kg", "the smallest"), and adds it to the bag.
+  2. "Anything else you need?" More items go in the same way; "no, that's
+     all" moves on.
+  3. "How would you like to pay?" Pay online (UPI, cards, netbanking,
+     wallets) or cash on delivery, as buttons.
+  4. The full address: name, mobile, house or flat and building, street or
+     area, landmark, pincode (fills the state), town, state, and email for
+     the receipt. A saved address is offered first.
+  5. The review: items, address, the store's delivery options with the
+     expected date, payment, total, and the **Pay** (or **Place order**)
+     button, which also sits above the message box. Nothing happens until
+     it is tapped, or the shopper says yes to that exact total. Online
+     payment opens Razorpay over the chat.
 - **Manages the bag.** "What is in my cart", "remove the first one",
   "make it 3", "one more", "empty my bag" (asks first), and - / + buttons.
 - **Orders the same again** from a past order (number plus phone or email).
@@ -227,10 +241,14 @@ orders through the same checkout as the checkout page.
 - The assistant never throws: a store that does not answer, an unknown
   button or gibberish all get a polite answer with a way forward.
 
-**Brands.** The live store lists every product under its own name ("Paws &
-Tails"), so the brand is read from the product title against the list in
-`assets/catalogue.js`. Add a brand there and the assistant, brand pages and
-tiles all know it.
+**Finding brands and products.** The live store lists every product under
+its own name ("Paws & Tails"), so the brand is read from the product title
+against the list in `assets/catalogue.js`. The assistant tries one source
+after another until something fits: a collection the message names ("Acana",
+"Acana Dog Food"), the collection for the kind of product, the brand, the
+store's own search (as the search box uses it), then its as-you-type
+suggestions. The tests run this with a store that answers brand and title
+queries with nothing, and Acana is still found.
 
 `assets/assistant.js` decides what to do; `assets/chat.js` draws it: product
 cards, a size picker, the bag, the address form, the summary and the
@@ -267,7 +285,7 @@ node test/mock-store.js        then open http://localhost:4199
 ## Tests
 
 ```
-node test/test-storefront.js   203 checks: money, transport, tiles, live
+node test/test-storefront.js   220 checks: money, transport, tiles, live
                                collections, shop all, search and its
                                fallbacks, tokenless-safe product and bag, saved,
                                quick add, policies, order lookup client,
@@ -283,16 +301,16 @@ node test/test-checkout-api.js 47 checks: checkout against stand-ins for
                                and its cap, online payment, forged and part
                                payments refused, double confirm and webhook
                                make one order, closed popup cleans up
-node test/test-nlu.js          91 checks: typos, Hinglish, quantities, sizes,
+node test/test-nlu.js          103 checks: typos, Hinglish, quantities, sizes,
                                "the second one", yes and no, intents in and
                                out of context
-node test/test-assistant.js    126 checks: delivery dates from policy wording;
+node test/test-assistant.js    153 checks: delivery dates from policy wording;
                                whole conversations against the mock store,
                                including orders placed in the chat (cash on
                                delivery and online), stale summaries refused,
                                closed payment window, bag edits, reorder,
                                handover with the conversation
-node test/test-ui.js           165 checks in a real browser against the mock
+node test/test-ui.js           173 checks in a real browser against the mock
                                store: white page, menus from the store, every
                                product reachable from shop all, header search
                                (including its layout), every product picture

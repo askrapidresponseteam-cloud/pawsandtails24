@@ -791,6 +791,17 @@ section('house rules');
   ok('every shipped file was checked', files.length >= 6);
 
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  const build = (html.match(/<meta name="pt-build" content="(\d+)">/) || [])[1];
+  ok('the page says which build it is', !!build);
+  const assetRefs = html.match(/(?:href|src)="assets\/[^"]+\.(?:js|css)[^"]*"/g) || [];
+  ok('every script and stylesheet carries that build, so a new release is never mixed with old files (' + assetRefs.length + ')',
+    assetRefs.length >= 9 && assetRefs.every((r) => r.indexOf('?v=' + build + '"') > 0));
+  ok('preloaded fonts use the same address as the stylesheet, so they load once', (html.match(/href="assets\/fonts\/[^"]+"/g) || []).every((r) => r.indexOf('?') < 0));
+  ['nlu.js', 'assistant.js', 'app.js', 'chat.js', 'storefront.js', 'catalogue.js', 'fit.js'].forEach((f) => {
+    ok('the page loads ' + f, html.indexOf('assets/' + f + '?v=') > 0);
+  });
+  ok('nlu.js loads before the assistant, the assistant before the app, the app before the chat',
+    html.indexOf('nlu.js') < html.indexOf('assistant.js') && html.indexOf('assistant.js') < html.indexOf('app.js') && html.indexOf('app.js') < html.indexOf('chat.js'));
   ok('the page loads the catalogue, the client and the app', /catalogue\.js/.test(html) && /storefront\.js/.test(html) && /app\.js/.test(html));
   ok('the page carries no product data of its own', !/priceRange|₹[0-9]/.test(html));
 

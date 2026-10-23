@@ -107,6 +107,21 @@ eq('"remove acana" changes the bag', intent('remove acana from my cart', { hasBa
 eq('"yes" with a bag goes to checkout', intent('yes', { hasBag: true }), 'checkout');
 eq('a new question in the middle of checkout is still answered', intent('where is my order #1001', { pending: 'confirm' }), 'track');
 
+section('buying, step by step');
+eq('"no, that\'s all" after adding moves on', intent('no, that\'s all', { pending: 'more', hasBag: true }), 'moreNo');
+eq('"nothing else" moves on', intent('nothing else', { pending: 'more', hasBag: true }), 'moreNo');
+eq('"done" moves on', intent('done', { pending: 'more', hasBag: true }), 'moreNo');
+eq('"yes" means there is more to add', intent('yes', { pending: 'more', hasBag: true }), 'moreYes');
+eq('"also add drools" adds it', intent('also add drools', { pending: 'more', hasBag: true }), 'buy');
+eq('"one more" adds another of the same', intent('one more', { pending: 'more', hasBag: true }), 'bagQty');
+eq('"cash on delivery" chooses the payment', intent('cash on delivery', { pending: 'payment', hasBag: true }), 'choosePayment');
+eq('"upi" chooses online', [intent('upi', { pending: 'payment' }), read('upi', { pending: 'payment' }).entities.payment], ['choosePayment', 'online']);
+eq('a tracking question mid-checkout is still a tracking question', intent('where is my order', { pending: 'payment' }), 'track');
+
+eq('"I want to add something else" asks what, rather than searching or checking out', [intent('I want to add something else', { hasBag: true }), read('I want to add something else').entities.terms], ['moreYes', '']);
+eq('"order something else" asks what too', intent('order something else', { hasBag: true }), 'moreYes');
+eq('"order something" asks what, rather than searching', read('I want to order something').entities.terms, '');
+
 section('matching titles');
 eq('every word found', N.titleScore('acana puppy', 'Acana Puppy Recipe 2kg'), 1);
 eq('half the words found', N.titleScore('acana senior', 'Acana Puppy Recipe'), 0.5);

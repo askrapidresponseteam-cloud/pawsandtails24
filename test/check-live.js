@@ -42,6 +42,15 @@ function why(e) {
 (async function run() {
   process.stdout.write('\n  ' + BASE + '/api/' + C.apiVersion + '/graphql.json\n\n');
 
+  /* Which release is live: the number in the page, and the one here. */
+  try {
+    const fs = require('fs');
+    const here = (fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8').match(/pt-build" content="(\d+)"/) || [])[1];
+    const page = await (await fetch(BASE + '/?check=' + Date.now(), { headers: { 'Cache-Control': 'no-cache' } })).text();
+    const live = (page.match(/pt-build" content="(\d+)"/) || [])[1];
+    line('build', live === here, 'live ' + (live || 'unknown') + ', this folder ' + here + (live !== here ? ' (still deploying, or not pushed)' : ''), false);
+  } catch (e) { line('build', false, why(e), false); }
+
   try { const s = await S.ping(); line('store answers', true, s.name, true); }
   catch (e) { line('store answers', false, why(e), true); process.stdout.write('\n'); process.exit(1); }
 

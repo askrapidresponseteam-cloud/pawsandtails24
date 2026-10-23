@@ -165,11 +165,26 @@ function variantById(id) {
   for (const p of products) for (const v of p.variants) if (v.id === id) return { product: p, variant: v };
   return null;
 }
+/* Brand collections, as the live store has them ("Acana", "Acana Dog Food"),
+ * filled from the products above. */
+const BRAND_COLLECTIONS = [{ handle: 'acana', title: 'Acana' }, { handle: 'acana-dog-food', title: 'Acana Dog Food' }];
+products.forEach((p) => {
+  if (p.brand !== 'Acana') return;
+  p.aisles.push('acana');
+  if (/food/i.test(p.title)) p.aisles.push('acana-dog-food');
+});
+
+/* How strict the pretend store is about field queries. The live store may
+ * answer vendor: and title: queries with nothing; the shop must still find
+ * brands. Tests switch this on to prove it. */
+const strict = { fieldQueries: false };
+
 function inAisle(handle) { return products.filter((p) => p.aisles.indexOf(handle) >= 0); }
 
 function allCollections() {
   const out = [];
   FIXTURE.forEach((s) => s.aisles.forEach((a) => out.push({ handle: a[1], title: a[0] })));
+  BRAND_COLLECTIONS.forEach((c) => out.push(c));
   EMPTY_COLLECTIONS.forEach((c) => out.push(c));
   return out;
 }
@@ -362,6 +377,8 @@ function resolve(op, v, query) {
        * which is how the saved list is read back. */
       const wanted = handles.map((h) => h.slice(8, -1));
       list = products.filter((p) => wanted.indexOf(p.handle) >= 0);
+    } else if (strict.fieldQueries && /\b(vendor|title):/i.test(term)) {
+      list = [];
     } else {
       list = products.filter((p) => queryMatches(p, term));
     }
@@ -584,4 +601,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, products, PORT, admin, razorpay, POLICY };
+module.exports = { server, products, PORT, admin, razorpay, POLICY, strict };

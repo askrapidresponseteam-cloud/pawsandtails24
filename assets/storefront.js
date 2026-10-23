@@ -360,20 +360,43 @@
     });
   }
 
-  /** One page of everything a brand lists, filtered by the store. */
+  /** One page of everything a brand lists. The vendor, or the brand at the
+   *  start of title words: the live store lists everything under its own
+   *  name. If that finds nothing (a store can answer field queries
+   *  differently), the store's own search for the brand name takes over, and
+   *  the cursor remembers which one is paging. */
   function brandPage(brand, opts) {
     opts = opts || {};
     var sort = SORTS[opts.sort] || SORTS.featured;
-    /* The vendor, or every word of the brand at the start of a title word:
-     * the live store lists everything under its own name. */
     var name = String(brand || '').replace(/\\/g, '');
-    var words = name.toLowerCase().replace(/["'\\:()\[\]{}<>!^~*?]/g, ' ').split(/\s+/).filter(Boolean);
+    var want = name.toLowerCase();
+    var after = String(opts.after || '');
+    function mine(p) {
+      return p.brand.toLowerCase() === want || (' ' + p.title.toLowerCase() + ' ').indexOf(' ' + want + ' ') >= 0;
+    }
+    function bySearch(cursor, mode) {
+      return searchAll(name, { sort: opts.sort, after: cursor || null, mode: mode || undefined }).then(function (page) {
+        page.products = page.products.filter(mine);
+        page.cursor = page.hasMore && page.cursor ? 's|' + page.mode + '|' + page.cursor : null;
+        page.via = 'search';
+        return page;
+      });
+    }
+    if (after.indexOf('s|') === 0) {
+      var parts = after.split('|');
+      return bySearch(parts.slice(2).join('|'), parts[1] === 'catalogue' ? 'catalogue' : undefined);
+    }
+    var words = want.replace(/["'\\:()\[\]{}<>!^~*?]/g, ' ').split(/\s+/).filter(Boolean);
     var q = "vendor:'" + name.replace(/'/g, "\\'") + "'" +
       (words.length ? ' OR (' + words.map(function (w) { return 'title:' + w + '*'; }).join(' AND ') + ')' : '');
     return productsQuery(q, sort, opts, 'brand|' + brand).then(function (page) {
-      var want = name.toLowerCase();
-      page.products = page.products.filter(function (p) { return p.brand.toLowerCase() === want; });
+      page.products = page.products.filter(mine);
+      if (!page.products.length && !after) return bySearch(null);
+      page.via = 'query';
       return page;
+    }, function (e) {
+      if (after) throw e;
+      return bySearch(null);
     });
   }
 
