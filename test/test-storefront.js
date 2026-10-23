@@ -267,11 +267,27 @@ section('aisles');
 }
 
 {
-  const { S, f } = fresh(() => ({ products: { pageInfo: {}, nodes: [TILE] } }));
+  const hills = Object.assign({}, TILE, { vendor: "Hill's" });
+  const { S, f } = fresh(() => ({ products: { pageInfo: {}, nodes: [hills, TILE] } }));
   later(S.brandPage("Hill's", { sort: 'priceHigh' }).then((page) => {
-    eq('a brand page reads the products query', page.products.length, 1);
-    eq('an apostrophe in a brand is escaped for the query', f.calls[0].variables.q, "vendor:'Hill\\'s'");
+    eq('a brand page keeps only that brand', page.products.map((p) => p.brand), ["Hill's"]);
+    eq('it asks for the vendor, or the brand at the start of title words, apostrophe escaped',
+      f.calls[0].variables.q, "vendor:'Hill\\'s' OR (title:hill s*)".replace('hill s*', 'hill* AND title:s*'));
     eq('price high to low is reversed', f.calls[0].variables.reverse, true);
+  }));
+}
+
+section('brands when the store lists everything under its own name');
+{
+  const own = (title) => Object.assign({}, TILE, { vendor: 'Paws & Tails\u2122', title: title });
+  const { S, f } = fresh(() => ({ products: { pageInfo: {}, nodes: [own('Acana Puppy Recipe 2kg'), own('Orijen Puppy 2kg'), own('Plain lead')] } }), { brands: ['Acana', 'Orijen', 'Royal Canin'] });
+  eq('the brand comes from the title', S._tileOf(own('Acana Puppy Recipe')).brand, 'Acana');
+  eq('a brand later in the title is found too', S._tileOf(own('Puppy food by Royal Canin')).brand, 'Royal Canin');
+  eq('no known brand shows no brand, not the store name', S._tileOf(own('Plain lead')).brand, '');
+  eq('a real vendor is still used as it is', S._tileOf(Object.assign({}, TILE, { vendor: 'Zoetis' })).brand, 'Zoetis');
+  later(S.brandPage('Acana').then((page) => {
+    eq('a brand page finds the brand by title', page.products.map((p) => p.title), ['Acana Puppy Recipe 2kg']);
+    eq('with a title prefix query', f.calls[0].variables.q, "vendor:'Acana' OR (title:acana*)");
   }));
 }
 
@@ -504,7 +520,7 @@ section('the bag');
     eq('the quantity goes with it', f.calls[0].variables.input.lines[0].quantity, 2);
     eq('the bag knows its count', cart.count, 2);
     eq('the subtotal comes from the store', cart.subtotalPaise, 690000);
-    eq('the checkout link is the store own', cart.checkoutUrl, 'https://pawsandtails24.com/cart/c/abc123');
+    eq('the bag carries no link to the store\'s own checkout', cart.checkoutUrl, undefined);
     eq('the line carries the product handle for linking back', cart.lines[0].handle, 'rc-medium-adult');
     eq('the line total comes from the store, not multiplication here', cart.lines[0].linePaise, 690000);
     eq('the cart id is kept for the next visit', S.cartId(), 'gid://shopify/Cart/abc123');
@@ -657,7 +673,7 @@ section('quick add, store policies and order lookup');
     : {});
   later(pol.S.policies({ shippingPath: '/pages/shipping', refundPath: '/pages/returns' }).then((p) => {
     eq('the shipping page wins over the policy setting', p.shipping.text, 'Page text.');
-    eq('and links to that page', p.shipping.url, 'https://pawsandtails24.com/pages/shipping');
+    eq('and links to this site\'s copy of it', p.shipping.url, '#/policy/shipping');
     eq('no returns text at all gives an empty answer, not an error', p.refund.text, '');
   }));
   const polDown = fresh(() => ({ status: 500 }));
@@ -780,7 +796,16 @@ section('house rules');
 
   const appjs = fs.readFileSync(path.join(ROOT, 'assets', 'app.js'), 'utf8');
   ok('the interface holds no hardcoded prices', !/\bpaise:\s*\d{3,}/.test(appjs));
-  ok('checkout leaves for the cart checkout url', /checkoutUrl/.test(appjs));
+  /* Shoppers never leave pawsandtails24.vercel.app: no page hands them the
+   * store's checkout or any link built on the store's domain. */
+  ['app.js', 'chat.js', 'assistant.js', 'storefront.js'].forEach((f) => {
+    const src = fs.readFileSync(path.join(ROOT, 'assets', f), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    ok(f + ' never sends anyone to the store\'s checkout', !/checkoutUrl/.test(src));
+    ok(f + ' never builds a link on the store\'s domain', !/shopUrl\(/.test(src.replace(/function shopUrl\(/, '').replace(/shopUrl: shopUrl/, '')));
+  });
+  ok('checkout is a page on this site', /#\/checkout/.test(appjs) && /S\.checkout\('place'/.test(appjs));
+  const vjson = JSON.parse(fs.readFileSync(path.join(ROOT, 'vercel.json'), 'utf8'));
+  ok('vercel.json only forwards the data API, never a page', (vjson.rewrites || []).every((r) => /graphql\.json$/.test(r.source)) && !vjson.redirects);
 }
 
 /* ====================================================================== RUN */

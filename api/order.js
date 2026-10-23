@@ -27,9 +27,8 @@
  * ========================================================================== */
 'use strict';
 
-const API_VERSION = '2026-01';
-const RATE_LIMIT = 12;          /* lookups per address per window */
-const RATE_WINDOW_MS = 60 * 1000;
+const { createAdmin, readJson, clientIp, send, rateLimiter, API_VERSION } = require('../lib/admin.js');
+const RATE_LIMIT = 12;          /* lookups per address per minute */
 
 const ORDER_QUERY =
   'query PtOrder($q: String!) {' +
@@ -40,7 +39,7 @@ const ORDER_QUERY =
   '  shippingAddress { city province zip phone }' +
   '  totalPriceSet { shopMoney { amount currencyCode } }' +
   '  statusPageUrl' +
-  '  lineItems(first: 30) { nodes { title variantTitle quantity image { url } } }' +
+  '  lineItems(first: 30) { nodes { title variantTitle quantity image { url } variant { id } } }' +
   '  fulfillments(first: 10) {' +
   '   createdAt status displayStatus estimatedDeliveryAt inTransitAt deliveredAt' +
   '   trackingInfo(first: 3) { company number url }' +
@@ -138,7 +137,9 @@ function shape(node) {
       title: String(l.title || ''),
       variant: String(l.variantTitle || '').replace(/^Default Title$/, ''),
       qty: l.quantity || 0,
-      image: (l.image && l.image.url) || null
+      image: (l.image && l.image.url) || null,
+      /* So "order the same again" can put it back in a bag. */
+      variantId: (l.variant && l.variant.id) || null
     })),
     shipments: shipments,
     statusUrl: /^https?:\/\//.test(String(node.statusPageUrl || '')) ? node.statusPageUrl : null
@@ -149,54 +150,11 @@ function shape(node) {
 
 function createHandler(opts) {
   opts = opts || {};
-  const env = opts.env || process.env;
-  const doFetch = opts.fetchImpl || ((...a) => fetch(...a));
   const now = opts.now || (() => Date.now());
-  let token = null;            /* { value, until } */
-  const hits = new Map();
-
-  function shop() {
-    return String(env.SHOPIFY_SHOP || '').trim().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-  }
-  function configured() {
-    return !!(shop() && (env.SHOPIFY_ADMIN_TOKEN || (env.SHOPIFY_CLIENT_ID && env.SHOPIFY_CLIENT_SECRET)));
-  }
-
-  async function accessToken(renew) {
-    if (env.SHOPIFY_ADMIN_TOKEN) return env.SHOPIFY_ADMIN_TOKEN;
-    if (!renew && token && token.until > now()) return token.value;
-    const body = 'grant_type=client_credentials' +
-      '&client_id=' + encodeURIComponent(env.SHOPIFY_CLIENT_ID) +
-      '&client_secret=' + encodeURIComponent(env.SHOPIFY_CLIENT_SECRET);
-    const res = await doFetch('https://' + shop() + '/admin/oauth/access_token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-      body: body
-    });
-    if (res.status !== 200) throw Object.assign(new Error('token ' + res.status), { upstream: true });
-    const j = await res.json();
-    if (!j || !j.access_token) throw Object.assign(new Error('token missing'), { upstream: true });
-    /* Renew five minutes early so a token never dies mid-lookup. */
-    const life = Math.max(60, Number(j.expires_in) || 86399) * 1000;
-    token = { value: j.access_token, until: now() + life - 5 * 60 * 1000 };
-    return token.value;
-  }
-
-  async function admin(query, variables, renewed) {
-    const t = await accessToken(!!renewed);
-    const res = await doFetch('https://' + shop() + '/admin/api/' + API_VERSION + '/graphql.json', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Shopify-Access-Token': t },
-      body: JSON.stringify({ query: query, variables: variables })
-    });
-    if (res.status === 401 && !renewed && !env.SHOPIFY_ADMIN_TOKEN) return admin(query, variables, true);
-    if (res.status !== 200) throw Object.assign(new Error('admin ' + res.status), { upstream: true, status: res.status });
-    const j = await res.json();
-    if (j && j.errors && j.errors.length) {
-      throw Object.assign(new Error('admin: ' + j.errors.map((e) => e && e.message).join(' | ')), { upstream: true });
-    }
-    return j && j.data;
-  }
+  const store = createAdmin({ env: opts.env || process.env, fetchImpl: opts.fetchImpl, now: now });
+  const configured = store.configured;
+  const admin = (q, v) => store.query(q, v);
+  const allow = rateLimiter(RATE_LIMIT, now);
 
   /** The lookup itself: { status, body }. Exposed for tests. */
   async function lookup(input, ip) {
@@ -208,13 +166,7 @@ function createHandler(opts) {
     if (!order || !contact) {
       return { status: 400, body: { error: 'Enter the order number and the phone number or email used for the order.' } };
     }
-    const key = String(ip || 'unknown');
-    const t = now();
-    const recent = (hits.get(key) || []).filter((x) => t - x < RATE_WINDOW_MS);
-    if (recent.length >= RATE_LIMIT) return { status: 429, body: { error: 'Too many tries. Wait a minute and try again.' } };
-    recent.push(t);
-    hits.set(key, recent);
-    if (hits.size > 5000) hits.clear();
+    if (!allow(String(ip || 'unknown'))) return { status: 429, body: { error: 'Too many tries. Wait a minute and try again.' } };
 
     const q = 'name:#' + order + ' OR name:' + order;
     let data;
@@ -229,33 +181,15 @@ function createHandler(opts) {
     return { status: 200, body: { found: true, order: shape(hit) } };
   }
 
-  async function readBody(req) {
-    if (req.body && typeof req.body === 'object') return req.body;
-    if (typeof req.body === 'string') { try { return JSON.parse(req.body); } catch (e) { return {}; } }
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch (e) { return {}; }
-  }
-
   async function handler(req, res) {
-    res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-store');
-    if (req.method !== 'POST') {
-      res.statusCode = 405;
-      res.setHeader('Allow', 'POST');
-      res.end(JSON.stringify({ error: 'POST only' }));
-      return;
-    }
-    const ip = String((req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip'])) ||
-      (req.socket && req.socket.remoteAddress) || '').split(',')[0].trim();
+    if (req.method !== 'POST') { res.setHeader('Allow', 'POST'); send(res, 405, { error: 'POST only' }); return; }
     let out;
     try {
-      out = await lookup(await readBody(req), ip);
+      out = await lookup(await readJson(req), clientIp(req));
     } catch (e) {
       out = { status: 500, body: { error: 'Something went wrong looking up the order.' } };
     }
-    res.statusCode = out.status;
-    res.end(JSON.stringify(out.body));
+    send(res, out.status, out.body);
   }
 
   handler.lookup = lookup;
@@ -269,3 +203,4 @@ module.exports.cleanOrder = cleanOrder;
 module.exports.cleanContact = cleanContact;
 module.exports.shape = shape;
 module.exports.API_VERSION = API_VERSION;
+module.exports.STAGE_LABELS = LABELS;

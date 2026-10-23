@@ -15,9 +15,9 @@
  * Every forwarded call is logged with its operation, status and timing, so you
  * can watch the catalogue being streamed rather than take it on trust.
  *
- * Checkout is NOT proxied. The bag is a real Shopify cart and its checkoutUrl
- * points at the store, so pressing Checkout here leaves for the real checkout
- * and a payment there is a real order. Use a draft or a test product.
+ * Checkout runs here on the site (api/checkout.js). With the SHOPIFY_ and
+ * RAZORPAY_ variables set it creates REAL orders in the store; use Razorpay
+ * test keys and cancel test orders in the Shopify admin afterwards.
  * ========================================================================== */
 'use strict';
 
@@ -127,14 +127,17 @@ function serveFile(res, file) {
  * SHOPIFY_SHOP and the app credentials from the environment; without them
  * it answers "not set up yet", which the track page explains. */
 const orderApi = require(path.join(ROOT, 'api', 'order.js'));
+const checkoutApi = require(path.join(ROOT, 'api', 'checkout.js'));
+const webhookApi = require(path.join(ROOT, 'api', 'razorpay-webhook.js'));
 
 const server = http.createServer((req, res) => {
   const url = decodeURIComponent(String(req.url || '/').split('?')[0]);
 
-  if (url === '/api/order') {
+  const own = { '/api/order': ['order lookup', orderApi], '/api/checkout': ['checkout', checkoutApi], '/api/razorpay-webhook': ['razorpay webhook', webhookApi] }[url];
+  if (own) {
     const started = Date.now();
-    res.on('finish', () => log(`  ${String(res.statusCode).padEnd(3)}  ${String(Date.now() - started).padStart(5)}ms            order lookup`));
-    orderApi(req, res);
+    res.on('finish', () => log(`  ${String(res.statusCode).padEnd(3)}  ${String(Date.now() - started).padStart(5)}ms            ${own[0]}`));
+    own[1](req, res);
     return;
   }
 
@@ -171,6 +174,7 @@ server.listen(PORT, () => {
   log('  catalogue     forwarded to https://' + UPSTREAM + '/api/...');
   log('  token         ' + (TOKEN ? 'sent with every call' : 'none (tokenless, same as production)'));
   log('  order lookup  ' + (orderApi.configured() ? 'on, reading orders from ' + process.env.SHOPIFY_SHOP : 'off (set SHOPIFY_SHOP and the app credentials to try it)'));
+  log('  checkout      ' + (checkoutApi.configured() ? 'on, REAL orders in the store' + (checkoutApi.online() ? ', Razorpay keys set (use test keys here)' : ', cash on delivery only') : 'off (same variables as order lookup)'));
   log('');
   log('  Each line below is one live call to the store:');
   log('');

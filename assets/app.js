@@ -17,7 +17,7 @@
   var S = window.PTStorefront;
   var C = window.PTCatalogue;
 
-  S.configure({ version: C.apiVersion, domain: C.domain, apiBase: window.PT_API_BASE || '', token: window.PT_TOKEN || '' });
+  S.configure({ version: C.apiVersion, domain: C.domain, apiBase: window.PT_API_BASE || '', token: window.PT_TOKEN || '', brands: C.brands || [] });
 
   var app = document.getElementById('app');
   var state = {
@@ -47,7 +47,43 @@
         if ((name === 'href' || name === 'src') && /^\s*javascript:/i.test(a.value)) n.removeAttribute(a.name);
       });
     });
+    /* Text written in the store links to the store's own pages. Those become
+     * this site's pages, and any other link to the store is left as plain
+     * text, so nothing here sends a shopper to the store's domain. */
+    box.querySelectorAll('a[href]').forEach(function (a) {
+      var here = inSite(a.getAttribute('href'));
+      if (here === null) return;
+      if (here) { a.setAttribute('href', here); a.removeAttribute('target'); }
+      else { a.replaceWith(document.createTextNode(a.textContent)); }
+    });
     return box.innerHTML;
+  }
+
+  /** For a link into the store: this site's address for it, '' when there
+   *  is no such page here, or null when the link is not to the store. */
+  function inSite(href) {
+    var h = String(href || '').trim();
+    var path;
+    var m = h.match(/^(?:https?:)?\/\/([^/?#]+)(\/[^?#]*)?/i);
+    if (m) {
+      var host = m[1].toLowerCase();
+      if (!/(^|\.)myshopify\.com$|(^|\.)pawsandtails24\.com$|(^|\.)shopify\.com$/.test(host) || /^cdn\.shopify\.com$/.test(host)) return null;
+      path = m[2] || '/';
+    } else if (/^\/(?!\/)/.test(h)) {
+      path = h.split(/[?#]/)[0];
+    } else {
+      return null;
+    }
+    var p;
+    if ((p = path.match(/^\/products\/([^/]+)/))) return '#/p/' + p[1];
+    if ((p = path.match(/^\/collections\/([^/]+)\/products\/([^/]+)/))) return '#/p/' + p[2];
+    if ((p = path.match(/^\/collections\/([^/]+)/))) return p[1] === 'all' ? '#/all' : '#/c/' + p[1];
+    if (/^\/(pages\/shipping|policies\/shipping)/.test(path)) return '#/policy/shipping';
+    if (/^\/(pages\/returns|pages\/return|policies\/refund)/.test(path)) return '#/policy/returns';
+    if (/^\/(account|pages\/track)/.test(path)) return '#/track';
+    if (/^\/pages\/contact/.test(path)) return '#/help';
+    if (path === '/' || path === '') return '#/';
+    return '';
   }
 
   function toast(message) {
@@ -240,9 +276,8 @@
         '<div><h4>Help</h4><ul>' +
           '<li><a href="#/help">Contact us</a></li>' +
           '<li><a href="#/track">Track an order</a></li>' +
-          '<li><a href="' + esc(S.shopUrl(C.policies.shipping)) + '">Shipping</a></li>' +
-          '<li><a href="' + esc(S.shopUrl(C.policies.refund)) + '">Returns</a></li>' +
-          '<li><a href="' + esc(S.shopUrl(C.policies.account)) + '">Your account</a></li>' +
+          '<li><a href="#/policy/shipping">Shipping</a></li>' +
+          '<li><a href="#/policy/returns">Returns</a></li>' +
         '</ul></div>' +
         '<div><h4>Reach us</h4><ul>' +
           '<li><a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a></li>' +
@@ -677,9 +712,7 @@
           '<div class="rail">' + tiles(recs.slice(0, 10)) + '</div></section>';
       });
     }).catch(function (e) {
-      app.innerHTML = '<div class="wrap" style="padding-top:40px">' + errorBlock(e) +
-        '<p style="padding-top:14px;font-size:14px;color:var(--mute)">Or open <a href="' +
-        esc(S.shopUrl('/products/' + handle)) + '">this product on ' + esc(C.domain) + '</a>.</p></div>';
+      app.innerHTML = '<div class="wrap" style="padding-top:40px">' + errorBlock(e) + '</div>';
     });
   }
 
@@ -759,8 +792,8 @@
             '<div class="inner">' + safeHtml(p.descriptionHtml) + '</div></details>' : '') +
           '<details class="expand"><summary><span class="plus">+</span> Delivery and returns</summary>' +
             '<div class="inner">Delivery is charged by weight and address, and is shown on the checkout page before you pay. ' +
-            'See <a href="' + esc(S.shopUrl(C.policies.shipping)) + '">shipping</a> and ' +
-            '<a href="' + esc(S.shopUrl(C.policies.refund)) + '">returns</a> for the full terms.</div></details>' +
+            'See <a href="#/policy/shipping">shipping</a> and ' +
+            '<a href="#/policy/returns">returns</a> for the full terms.</div></details>' +
           '<details class="expand"><summary><span class="plus">+</span> Ask about this product</summary>' +
             '<div class="inner">Call <a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a>, ' +
             'message us on <a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp</a>, ' +
@@ -895,7 +928,7 @@
     } else {
       body = '<div class="lines">' + cart.lines.map(lineHtml).join('') + '</div>' +
         '<div class="foot">' + totalsHtml(cart) +
-          '<button class="btn wide" data-act="checkout">Checkout securely</button>' +
+          '<a class="btn wide" href="#/checkout" data-act="closeBag">Checkout</a>' +
           '<a href="#/bag" data-act="closeBag" style="text-align:center;font-size:13.5px">View the full bag</a>' +
         '</div>';
     }
@@ -921,10 +954,10 @@
       '<div class="bagpage">' +
         '<div>' + cart.lines.map(lineHtml).join('') + '</div>' +
         '<div class="panel">' + totalsHtml(cart) +
-          '<button class="btn wide" data-act="checkout">Checkout securely</button>' +
+          '<a class="btn wide" href="#/checkout">Checkout</a>' +
           '<a href="#/all" style="text-align:center;font-size:13.5px">Keep shopping</a>' +
           '<p style="font-size:12.5px;color:var(--mute-2);border-top:1px solid var(--line);padding-top:12px;margin-top:4px">' +
-          'Checkout, payment and your order are handled by our store on ' + esc(C.domain) + '.</p>' +
+          'Pay online with UPI, cards or netbanking, or cash on delivery. Your order is placed with our store straight away.</p>' +
         '</div>' +
       '</div></div>';
   }
@@ -943,16 +976,16 @@
       '<section class="band" style="padding-top:34px"><div style="display:grid;gap:10px;max-width:70ch">' +
         '<details class="expand"><summary><span class="plus">+</span> When will my order arrive?</summary>' +
           '<div class="inner">Delivery time and charge depend on weight and address, and both are shown at checkout before you pay. ' +
-          'Full terms are on our <a href="' + esc(S.shopUrl(C.policies.shipping)) + '">shipping page</a>. ' +
+          'Full terms are on our <a href="#/policy/shipping">shipping page</a>. ' +
           'Already ordered? <a href="#/track">Track it here</a>, or <a href="#/help" data-act="chat">ask our assistant</a> for a date to your pincode.</div></details>' +
         '<details class="expand"><summary><span class="plus">+</span> Can I return something?</summary>' +
-          '<div class="inner">See our <a href="' + esc(S.shopUrl(C.policies.refund)) + '">returns page</a> for what can be sent back and in what condition.</div></details>' +
+          '<div class="inner">See our <a href="#/policy/returns">returns page</a> for what can be sent back and in what condition.</div></details>' +
         '<details class="expand"><summary><span class="plus">+</span> Do you need a prescription?</summary>' +
           '<div class="inner">Some medicines and vet diets are confirmed with you before dispatch. ' +
           'If you are unsure, call <a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a> and ask before ordering.</div></details>' +
         '<details class="expand"><summary><span class="plus">+</span> Are these the store prices?</summary>' +
           '<div class="inner">Yes. Every product, price and stock line here is read from our store as the page loads, ' +
-          'and checkout happens on the store itself.</div></details>' +
+          'and every order is placed straight into our store.</div></details>' +
       '</div></section></div>';
   }
 
@@ -1066,7 +1099,7 @@
       if (go) { go.disabled = false; go.textContent = 'Track'; }
       if (res.configured === false) {
         out.innerHTML = '<div class="note"><b>Tracking here is being connected</b>' +
-          '<span>Your confirmation email has a "View your order" link with its live status, or our team can check it for you on ' +
+          '<span>Our team can check your order straight away. Send them the order number on ' +
           '<a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp</a> or <a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a>.</span></div>';
         return;
       }
@@ -1084,6 +1117,17 @@
   }
 
   document.addEventListener('submit', function (e) {
+    if (e.target && e.target.id === 'coForm') {
+      e.preventDefault();
+      var a = readForm();
+      var errs = checkForm(a);
+      showErrors(errs);
+      if (Object.keys(errs).length) return;
+      co.addr = a;
+      keepAddress(a);
+      quote();
+      return;
+    }
     if (e.target && e.target.id === 'trackForm') {
       e.preventDefault();
       runTrack(document.getElementById('tOrder').value, document.getElementById('tContact').value);
@@ -1132,10 +1176,7 @@
       state.cart = cart;
       pdp.adding = false;
       updatePip();
-      if (thenCheckout) {
-        if (cart && cart.checkoutUrl) { window.location.href = cart.checkoutUrl; return; }
-        toast('Could not open checkout. Try the bag.');
-      }
+      if (thenCheckout) { go('#/checkout'); return; }
       if (button) { button.disabled = false; button.textContent = 'Add to bag'; }
       state.drawer = true;
       renderDrawer();
@@ -1147,12 +1188,453 @@
   }
 
   function checkout() {
-    var cart = state.cart;
-    if (!cart || !cart.lines.length) { toast('The bag is empty.'); return; }
-    if (!cart.checkoutUrl) { toast('Checkout is not available right now.'); return; }
-    var btn = document.querySelector('[data-act="checkout"]');
-    if (btn) { btn.disabled = true; btn.textContent = 'Opening checkout'; }
-    window.location.href = cart.checkoutUrl;
+    state.drawer = false;
+    renderDrawer();
+    go('#/checkout');
+  }
+
+  /* =============================================================== CHECKOUT
+   * On this site, in three steps that open one after another: where it
+   * goes, how it comes, how to pay. The store prices the bag (its prices, its
+   * delivery rates for the pincode, its tax) through api/checkout.js and the
+   * order is placed in the store. Online payment opens Razorpay's popup on
+   * this page; the server checks the payment before the order is placed. */
+
+  var co = { quote: null, rate: null, pay: null, addr: null, busy: false, configured: true };
+  var ADDR_KEY = 'pt_address';
+
+  /* A first guess at the state from the pincode's first digits; the shopper
+   * can change it. */
+  var PIN_STATES = [
+    ['11', 'DL'], ['12', 'HR'], ['13', 'HR'], ['14', 'PB'], ['15', 'PB'], ['160', 'CH'], ['16', 'PB'], ['17', 'HP'],
+    ['194', 'LA'], ['18', 'JK'], ['19', 'JK'], ['246', 'UK'], ['247', 'UK'], ['248', 'UK'], ['249', 'UK'], ['262', 'UK'], ['263', 'UK'],
+    ['2', 'UP'], ['3', 'RJ'], ['36', 'GJ'], ['37', 'GJ'], ['38', 'GJ'], ['39', 'GJ'], ['403', 'GA'], ['4', 'MH'],
+    ['45', 'MP'], ['46', 'MP'], ['47', 'MP'], ['48', 'MP'], ['49', 'CG'], ['50', 'TS'], ['5', 'AP'],
+    ['56', 'KA'], ['57', 'KA'], ['58', 'KA'], ['59', 'KA'], ['605', 'PY'], ['6', 'TN'], ['67', 'KL'], ['68', 'KL'], ['69', 'KL'],
+    ['737', 'SK'], ['744', 'AN'], ['7', 'WB'], ['75', 'OR'], ['76', 'OR'], ['77', 'OR'], ['78', 'AS'],
+    ['790', 'AR'], ['791', 'AR'], ['792', 'AR'], ['793', 'ML'], ['794', 'ML'], ['795', 'MN'], ['796', 'MZ'], ['797', 'NL'], ['798', 'NL'], ['799', 'TR'],
+    ['8', 'BR'], ['814', 'JH'], ['815', 'JH'], ['816', 'JH'], ['82', 'JH'], ['83', 'JH']
+  ];
+  function stateOfPin(pin) {
+    var best = null;
+    PIN_STATES.forEach(function (x) { if (String(pin).indexOf(x[0]) === 0 && (!best || x[0].length > best[0].length)) best = x; });
+    return best ? best[1] : '';
+  }
+
+  function savedAddress() {
+    try { return JSON.parse(localStorage.getItem(ADDR_KEY) || 'null') || {}; } catch (e) { return {}; }
+  }
+  function keepAddress(a) {
+    try { localStorage.setItem(ADDR_KEY, JSON.stringify(a)); } catch (e) { /* blocked */ }
+  }
+
+  function cartLines() {
+    return (state.cart ? state.cart.lines : []).map(function (l) { return { variantId: l.variantId, qty: l.qty }; });
+  }
+
+  function field(id, label, value, opts) {
+    opts = opts || {};
+    return '<label class="cof' + (opts.cls ? ' ' + opts.cls : '') + '"><span>' + label + (opts.optional ? ' <small>optional</small>' : '') + '</span>' +
+      (opts.prefix ? '<span class="pre"><b>' + opts.prefix + '</b>' : '') +
+      '<input id="' + id + '" name="' + id + '" value="' + esc(value || '') + '"' +
+        (opts.type ? ' type="' + opts.type + '"' : '') + (opts.mode ? ' inputmode="' + opts.mode + '"' : '') +
+        (opts.auto ? ' autocomplete="' + opts.auto + '"' : '') + (opts.max ? ' maxlength="' + opts.max + '"' : '') + '>' +
+      (opts.prefix ? '</span>' : '') +
+      '<em class="err" id="' + id + 'Err"></em></label>';
+  }
+
+  function viewCheckout() {
+    co = { quote: null, rate: null, pay: null, addr: null, busy: false, configured: true };
+    var draw = function () {
+      var cart = state.cart;
+      if (!cart || !cart.lines.length) {
+        app.innerHTML = '<div class="wrap"><div class="empty"><h1>Your bag is empty</h1>' +
+          '<p>Add something and checkout opens here.</p><a class="btn" href="#/all">Start shopping</a></div></div>';
+        return;
+      }
+      var a = savedAddress();
+      var states = (C.states || []).map(function (st) {
+        return '<option value="' + st[0] + '"' + (a.state === st[0] ? ' selected' : '') + '>' + esc(st[1]) + '</option>';
+      }).join('');
+      app.innerHTML = '<div class="wrap"><div class="copage">' +
+        '<div class="comain">' +
+          '<div class="eyebrow">Secure checkout</div><h1 class="serif">Checkout</h1>' +
+          '<section class="costep open" id="coS1">' +
+            '<h2><span class="n">1</span>Where should it go?</h2>' +
+            '<div class="cosum1" id="coSum1" hidden></div>' +
+            '<form id="coForm" novalidate>' +
+              '<div class="cogrid">' +
+                field('coName', 'Full name', a.name, { auto: 'name', max: 80 }) +
+                field('coPhone', 'Mobile number', a.phone, { prefix: '+91', mode: 'numeric', auto: 'tel-national', max: 14 }) +
+                field('coEmail', 'Email, for the receipt', a.email, { optional: true, type: 'email', auto: 'email', max: 120, cls: 'wide' }) +
+                field('coAddr1', 'House, street, building', a.address1, { auto: 'address-line1', max: 120, cls: 'wide' }) +
+                field('coAddr2', 'Area, landmark', a.address2, { optional: true, auto: 'address-line2', max: 120, cls: 'wide' }) +
+                field('coZip', 'Pincode', a.zip, { mode: 'numeric', auto: 'postal-code', max: 6 }) +
+                field('coCity', 'Town or city', a.city, { auto: 'address-level2', max: 60 }) +
+                '<label class="cof wide"><span>State</span><select id="coState" autocomplete="address-level1"><option value="">Choose</option>' + states + '</select>' +
+                  '<em class="err" id="coStateErr"></em></label>' +
+              '</div>' +
+              '<button class="btn wide" type="submit" id="coNext">Continue</button>' +
+            '</form>' +
+          '</section>' +
+          '<section class="costep" id="coS2" hidden><h2><span class="n">2</span>Delivery</h2><div id="coRates"></div></section>' +
+          '<section class="costep" id="coS3" hidden><h2><span class="n">3</span>Payment</h2><div id="coPay"></div></section>' +
+          '<div id="coNote" aria-live="polite"></div>' +
+        '</div>' +
+        '<aside class="coside" id="coSide"></aside>' +
+      '</div></div>';
+      drawSide();
+    };
+    if (state.cart) draw();
+    else {
+      app.innerHTML = '<div class="wrap" style="padding-top:40px"><div class="skel" style="height:320px"><div class="bar"></div></div></div>';
+      refreshCart().then(draw);
+    }
+  }
+
+  function drawSide() {
+    var host = document.getElementById('coSide');
+    if (!host || !state.cart) return;
+    var q = co.quote;
+    var byVariant = {};
+    if (q && q.items) q.items.forEach(function (i) { byVariant[i.variantId] = i; });
+    var lines = state.cart.lines.map(function (l) {
+      return '<div class="coline"><span class="shot">' + (l.image ? '<img src="' + esc(img(l.image, 120)) + '" alt="">' : '') +
+        '</span><span class="t">' + esc(l.title) + '<small>' + (l.variantTitle ? esc(l.variantTitle) + ', ' : '') + 'qty ' + l.qty + '</small></span>' +
+        '<span class="mono">' + money(byVariant[l.variantId] ? byVariant[l.variantId].unitPaise * l.qty : (l.linePaise !== null ? l.linePaise : l.paise * l.qty)) + '</span></div>';
+    }).join('');
+    var sub = q ? q.subtotal : state.cart.subtotalPaise;
+    host.innerHTML = '<div class="cobox">' +
+      '<div class="cotop"><b>Your order</b><a href="#/bag">Edit bag</a></div>' + lines +
+      '<div class="corows">' +
+        '<div><span>Subtotal</span><span class="mono">' + money(sub) + '</span></div>' +
+        '<div><span>Delivery</span><span class="mono">' + (q ? (q.shipping ? money(q.shipping) : 'Free') : '<small>after the address</small>') + '</span></div>' +
+        (q && q.tax ? '<div class="fine"><span>' + (q.taxesIncluded ? 'Includes GST' : 'GST') + '</span><span class="mono">' + money(q.tax) + '</span></div>' : '') +
+        '<div class="tot"><span>Total</span><span class="mono">' + money(q ? q.total : sub) + '</span></div>' +
+      '</div></div>';
+  }
+
+  function readForm() {
+    var v = function (id) { var el = document.getElementById(id); return el ? el.value.trim() : ''; };
+    return {
+      name: v('coName'), phone: v('coPhone').replace(/\D/g, '').slice(-10), email: v('coEmail'),
+      address1: v('coAddr1'), address2: v('coAddr2'), zip: v('coZip').replace(/\D/g, ''), city: v('coCity'), state: v('coState')
+    };
+  }
+
+  function checkForm(a) {
+    var e = {};
+    if (a.name.length < 2) e.coName = 'Enter your full name.';
+    if (!/^[6-9]\d{9}$/.test(a.phone)) e.coPhone = 'Enter a 10 digit mobile number.';
+    if (a.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email)) e.coEmail = 'Check the email address.';
+    if (a.address1.length < 3) e.coAddr1 = 'Enter the house, street or building.';
+    if (!/^[1-9]\d{5}$/.test(a.zip)) e.coZip = 'Enter a 6 digit pincode.';
+    if (a.city.length < 2) e.coCity = 'Enter the town or city.';
+    if (!a.state) e.coState = 'Choose the state.';
+    return e;
+  }
+
+  var SERVER_FIELDS = { name: 'coName', phone: 'coPhone', email: 'coEmail', address1: 'coAddr1', zip: 'coZip', city: 'coCity', state: 'coState' };
+
+  function showErrors(e) {
+    document.querySelectorAll('.cof .err').forEach(function (n) { n.textContent = ''; n.parentNode.classList.remove('bad'); });
+    var first = null;
+    Object.keys(e).forEach(function (k) {
+      var n = document.getElementById(k + 'Err');
+      if (n) { n.textContent = e[k]; n.parentNode.classList.add('bad'); if (!first) first = document.getElementById(k); }
+    });
+    if (first) first.focus();
+  }
+
+  function coNote(html, kind) {
+    var n = document.getElementById('coNote');
+    if (n) n.innerHTML = html ? '<div class="conote ' + (kind || '') + '">' + html + '</div>' : '';
+  }
+
+  function whatsappOrder() {
+    var lines = (state.cart ? state.cart.lines : []).map(function (l) {
+      return '- ' + l.title + (l.variantTitle ? ' (' + l.variantTitle + ')' : '') + ' x' + l.qty;
+    }).join('\n');
+    var text = 'Hi Paws and Tails, I would like to order:\n' + lines;
+    return 'https://wa.me/' + C.support.whatsapp + '?text=' + encodeURIComponent(text);
+  }
+
+  function quote(rate) {
+    if (co.busy) return;
+    var a = co.addr;
+    co.busy = true;
+    var next = document.getElementById('coNext');
+    if (next) { next.disabled = true; next.textContent = 'Checking delivery'; }
+    coNote('');
+    S.checkout('quote', { lines: cartLines(), address: a, rate: rate || co.rate }).then(function (q) {
+      co.busy = false;
+      if (next) { next.disabled = false; next.textContent = 'Continue'; }
+      if (q.configured === false) {
+        co.configured = false;
+        coNote('<b>Online ordering is being switched on</b><span>Send us your order on WhatsApp and we will confirm it with you, or call ' +
+          '<a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a>.</span>' +
+          '<a class="btn" href="' + esc(whatsappOrder()) + '" target="_blank" rel="noopener">Order on WhatsApp</a>');
+        return;
+      }
+      if (!q.ok) {
+        if (q.fields) {
+          var e = {};
+          Object.keys(q.fields).forEach(function (k) { if (SERVER_FIELDS[k]) e[SERVER_FIELDS[k]] = q.fields[k]; });
+          showErrors(e);
+          openStep1();
+        }
+        coNote('<b>' + esc(q.error || 'Could not price the order.') + '</b>' +
+          (q.unavailable ? '<a class="btn quiet" href="#/bag">Open the bag</a>' : ''), 'warn');
+        return;
+      }
+      co.quote = q;
+      co.rate = q.rate;
+      closeStep1();
+      drawRates();
+      drawPay();
+      drawSide();
+    }).catch(function (err) {
+      co.busy = false;
+      if (next) { next.disabled = false; next.textContent = 'Continue'; }
+      coNote('<b>' + esc((err && err.message) || 'Could not reach checkout.') + '</b>', 'warn');
+    });
+  }
+
+  function closeStep1() {
+    var a = co.addr;
+    var st = (C.states || []).filter(function (x) { return x[0] === a.state; })[0];
+    document.getElementById('coForm').hidden = true;
+    var sum = document.getElementById('coSum1');
+    sum.hidden = false;
+    sum.innerHTML = '<div><b>' + esc(a.name) + '</b>, +91 ' + esc(a.phone) + (a.email ? ', ' + esc(a.email) : '') + '<br>' +
+      esc(a.address1) + (a.address2 ? ', ' + esc(a.address2) + '' : '') + ', ' + esc(a.city) + ' ' + esc(a.zip) + (st ? ', ' + esc(st[1]) : '') + '</div>' +
+      '<button class="colink" data-act="coEdit">Change</button>';
+    document.getElementById('coS1').classList.remove('open');
+    document.getElementById('coS2').hidden = false;
+    document.getElementById('coS3').hidden = false;
+  }
+
+  function openStep1() {
+    var f = document.getElementById('coForm');
+    if (!f) return;
+    f.hidden = false;
+    document.getElementById('coSum1').hidden = true;
+    document.getElementById('coS1').classList.add('open');
+    document.getElementById('coS2').hidden = true;
+    document.getElementById('coS3').hidden = true;
+    co.quote = null;
+    drawSide();
+  }
+
+  function drawRates() {
+    var q = co.quote;
+    var host = document.getElementById('coRates');
+    if (!host || !q) return;
+    var eta = '';
+    deliveryTerms().then(function (t) {
+      var e = A.estimate(t, { start: new Date(), region: A.regionOfPin(co.addr.zip), fallback: C.delivery && C.delivery.fallbackDays });
+      var el = document.getElementById('coEta');
+      if (el) el.textContent = 'Expected ' + A.fmtEta(e) + '.';
+    });
+    host.innerHTML = q.rates.map(function (r) {
+      return '<label class="corate' + (r.handle === q.rate ? ' on' : '') + '"><input type="radio" name="coRate" value="' + esc(r.handle) + '"' + (r.handle === q.rate ? ' checked' : '') + '>' +
+        '<span>' + esc(r.title) + '</span><b class="mono">' + (r.paise ? money(r.paise) : 'Free') + '</b></label>';
+    }).join('') + '<p class="cofine" id="coEta">' + eta + '</p>';
+  }
+
+  function drawPay() {
+    var q = co.quote;
+    var host = document.getElementById('coPay');
+    if (!host || !q) return;
+    if (!co.pay) co.pay = q.online ? 'online' : (q.cod.allowed ? 'cod' : null);
+    if (co.pay === 'cod' && !q.cod.allowed) co.pay = q.online ? 'online' : null;
+    var opts = [];
+    if (q.online) {
+      opts.push('<label class="corate' + (co.pay === 'online' ? ' on' : '') + '"><input type="radio" name="coPayBy" value="online"' + (co.pay === 'online' ? ' checked' : '') + '>' +
+        '<span>Pay now<small>UPI, cards, netbanking, wallets</small></span></label>');
+    }
+    opts.push('<label class="corate' + (co.pay === 'cod' ? ' on' : '') + (q.cod.allowed ? '' : ' off') + '"><input type="radio" name="coPayBy" value="cod"' +
+      (co.pay === 'cod' ? ' checked' : '') + (q.cod.allowed ? '' : ' disabled') + '>' +
+      '<span>Cash on delivery<small>' + esc(q.cod.allowed ? 'Pay when it arrives' : q.cod.why) + '</small></span></label>');
+    var label = co.pay === 'online' ? 'Pay ' + money(q.total) : co.pay === 'cod' ? 'Place order, pay ' + money(q.total) + ' on delivery' : 'Choose how to pay';
+    host.innerHTML = opts.join('') +
+      '<button class="btn wide" id="coPlace" data-act="coPlace"' + (co.pay ? '' : ' disabled') + '>' + label + '</button>' +
+      '<p class="cofine">' + (q.online ? 'Payments by Razorpay. Card and UPI details go to Razorpay, never to us. ' : '') +
+      'Your order is placed with our store as soon as it is ' + (q.online ? 'paid or ' : '') + 'confirmed.</p>';
+  }
+
+  function loadRazorpay() {
+    if (window.Razorpay) return Promise.resolve();
+    var src = window.PT_RAZORPAY_SCRIPT || (C.checkout && C.checkout.razorpayScript);
+    return new Promise(function (resolve, reject) {
+      var sc = document.createElement('script');
+      sc.src = src;
+      sc.onload = function () { resolve(); };
+      sc.onerror = function () { reject(new Error('Could not open the payment window. Check your connection and try again; nothing was charged.')); };
+      document.head.appendChild(sc);
+    });
+  }
+
+  /**
+   * Places an order, paying online or cash on delivery. One path for the
+   * checkout page and the assistant, so both behave identically.
+   *   p      { lines, address, rate, payment, expectTotal }
+   *   hooks  { onStatus(text) } for "Opening payment", "Confirming payment"
+   * Resolves to { ok: true, order } once the store has the order, or
+   * { ok: false, error, changed?, quote?, fields?, dismissed?, paymentId? }.
+   * Never rejects, so callers only ever handle answers.
+   */
+  function payAndPlace(p, hooks) {
+    hooks = hooks || {};
+    var status = function (t) { if (hooks.onStatus) hooks.onStatus(t); };
+    return S.checkout('place', p).then(function (r) {
+      if (!r.ok) {
+        var out = { ok: false, error: r.error || 'The order could not be placed.', fields: r.fields || null };
+        if (r.configured === false) { out.configured = false; out.error = 'Online ordering is being switched on.'; }
+        if (r.changed) { out.changed = true; out.quote = r; }
+        return out;
+      }
+      if (r.placed) { orderDone(r.order, p.address); return { ok: true, order: r.order }; }
+      status('Opening payment');
+      return loadRazorpay().then(function () {
+        return new Promise(function (resolve) {
+          var paid = false;
+          var rzp = new window.Razorpay({
+            key: r.pay.key, amount: r.pay.amount, currency: r.pay.currency, name: r.pay.name, description: r.pay.description,
+            order_id: r.pay.orderId, prefill: r.pay.prefill, theme: { color: '#2d1b3a' },
+            handler: function (resp) {
+              paid = true;
+              status('Confirming payment');
+              confirmLoop(resp, 0).then(function (c) {
+                if (c.ok) { orderDone(c.order, p.address); resolve({ ok: true, order: c.order }); }
+                else resolve({ ok: false, paid: true, paymentId: resp.razorpay_payment_id, error: c.error });
+              });
+            },
+            modal: {
+              ondismiss: function () {
+                if (paid) return;
+                S.checkout('abandon', { razorpay_order_id: r.pay.orderId }).catch(function () { /* best effort */ });
+                resolve({ ok: false, dismissed: true, error: 'Payment not completed. Nothing was charged.' });
+              }
+            }
+          });
+          rzp.open();
+        });
+      });
+    }).catch(function (err) {
+      return { ok: false, error: (err && err.message) || 'Could not reach checkout. Nothing was charged.' };
+    });
+  }
+
+  /* Razorpay has taken the money; keep asking the server to confirm it
+   * until it does, for a few tries. The webhook places it regardless. */
+  function confirmLoop(resp, tries) {
+    return S.checkout('confirm', resp).then(function (c) {
+      if (c.ok && c.placed) return { ok: true, order: c.order };
+      if (tries < 3) return wait(1500 * (tries + 1)).then(function () { return confirmLoop(resp, tries + 1); });
+      return { ok: false, error: (c.error || 'We could not confirm the payment yet.') + ' Please do not pay again; our team will confirm your order.' };
+    }, function () {
+      if (tries < 4) return wait(2000).then(function () { return confirmLoop(resp, tries + 1); });
+      return { ok: false, error: 'Your payment went through, but the connection dropped. Please do not pay again; our team will confirm your order.' };
+    });
+  }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+  /** The store has the order: remember where it went, empty the bag. */
+  function orderDone(order, a) {
+    keepAddress(a);
+    rememberOrder(order.name, a.phone);
+    try {
+      sessionStorage.setItem('pt_last_order', JSON.stringify({
+        name: order.name, total: order.total, payment: order.payment, who: String(a.name || '').split(' ')[0], zip: a.zip, city: a.city
+      }));
+    } catch (e) { /* blocked */ }
+    S.forgetCart();
+    state.cart = null;
+    updatePip();
+    if (state.drawer) renderDrawer();
+  }
+
+  function placeOrder() {
+    var q = co.quote;
+    if (!q || !co.pay || co.busy) return;
+    co.busy = true;
+    var btn = document.getElementById('coPlace');
+    var label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = co.pay === 'online' ? 'Opening payment' : 'Placing your order'; }
+    coNote('');
+    payAndPlace({ lines: cartLines(), address: co.addr, rate: co.rate, payment: co.pay, expectTotal: q.total }, {
+      onStatus: function (t) {
+        if (btn) btn.textContent = t;
+        if (t === 'Confirming payment') coNote('<b>Payment received. Confirming your order...</b>');
+      }
+    }).then(function (r) {
+      co.busy = false;
+      if (r.ok) { go('#/thanks/' + encodeURIComponent(String(r.order.name).replace(/^#/, ''))); return; }
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+      if (r.changed) { co.quote = r.quote; co.rate = r.quote.rate; drawRates(); drawPay(); drawSide(); }
+      if (r.fields) {
+        var e = {};
+        Object.keys(r.fields).forEach(function (k) { if (SERVER_FIELDS[k]) e[SERVER_FIELDS[k]] = r.fields[k]; });
+        openStep1(); showErrors(e);
+      }
+      if (r.dismissed) {
+        coNote('<b>Payment not completed.</b><span>Nothing was charged. Pay again, or choose cash on delivery.</span>', 'warn');
+      } else if (r.paid) {
+        coNote('<b>' + esc(r.error) + '</b><span>Payment id ' + esc(r.paymentId) + '. Message us on <a href="https://wa.me/' +
+          esc(C.support.whatsapp) + '">WhatsApp</a> with it.</span>', 'warn');
+      } else {
+        coNote('<b>' + esc(r.error) + '</b>', 'warn');
+      }
+    });
+  }
+
+  function viewThanks(num) {
+    var last = null;
+    try { last = JSON.parse(sessionStorage.getItem('pt_last_order') || 'null'); } catch (e) { last = null; }
+    if (last && String(last.name).replace(/^#/, '') !== String(num)) last = null;
+    var name = '#' + String(num || '').replace(/^#/, '');
+    app.innerHTML = '<div class="wrap"><div class="thanks">' +
+      '<div class="tick" aria-hidden="true"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>' +
+      '<div class="eyebrow">Order ' + esc(name) + '</div>' +
+      '<h1 class="serif">Thank you' + (last && last.who ? ', ' + esc(last.who) : '') + '.</h1>' +
+      '<p class="lede">' + (last
+        ? (last.payment === 'online' ? 'Paid ' + money(last.total) + '. ' : 'Pay ' + money(last.total) + ' in cash when it arrives. ') +
+          'Your order is with our team and goes out soon.'
+        : 'Your order is with our team and goes out soon.') + '</p>' +
+      (last ? '<p class="thanks-eta" id="thEta"></p>' : '') +
+      '<div class="ctas"><a class="btn" href="#/track/' + esc(String(num)) + '">Track this order</a><a class="btn quiet" href="#/all">Keep shopping</a></div>' +
+      '<details class="expand"><summary><span class="plus">+</span> What happens next</summary><div class="inner">' +
+        'We pack and dispatch it, then the courier and its tracking link show on the track page. ' +
+        'Questions? <a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp us</a> with the order number.</div></details>' +
+    '</div></div>';
+    if (last) {
+      deliveryTerms().then(function (t) {
+        var e = A.estimate(t, { start: new Date(), region: A.regionOfPin(last.zip), fallback: C.delivery && C.delivery.fallbackDays });
+        var el = document.getElementById('thEta');
+        if (el) el.textContent = 'Expected ' + A.fmtEta(e) + (last.city ? ' in ' + last.city : '') + '.';
+      });
+    }
+  }
+
+  /* ================================================================ POLICIES
+   * The store's shipping and returns pages, shown here. */
+
+  function viewPolicy(which) {
+    var key = which === 'returns' || which === 'refund' ? 'refund' : 'shipping';
+    var title = key === 'refund' ? 'Returns' : 'Shipping';
+    document.title = title + ' | Paws and Tails';
+    app.innerHTML = '<div class="wrap"><div class="policy"><div class="eyebrow">Paws and Tails</div><h1 class="serif">' + title + '</h1>' +
+      '<div id="polBody"><div class="skel" style="height:200px"><div class="bar"></div></div></div></div></div>';
+    S.policies({ shippingPath: C.policies.shipping, refundPath: C.policies.refund }).then(function (p) {
+      var host = document.getElementById('polBody');
+      if (!host) return;
+      var html = p[key] && p[key].html;
+      host.innerHTML = html
+        ? '<div class="polbody">' + safeHtml(html) + '</div>'
+        : '<div class="note"><b>This page is being updated</b><span>Ask us anything about ' + title.toLowerCase() +
+          ' on <a href="https://wa.me/' + esc(C.support.whatsapp) + '">WhatsApp</a> or <a href="tel:' + esc(C.support.phone) + '">' + esc(C.support.phoneLabel) + '</a>.</span></div>';
+    });
   }
 
   /* ================================================================ ROUTING */
@@ -1178,6 +1660,9 @@
     if (p0 === 'bag') return { page: 'bag', parts: parts };
     if (p0 === 'help') return { page: 'help', parts: parts };
     if (p0 === 'track' || p0 === 'orders' || p0 === 'order') return { page: 'track', parts: parts };
+    if (p0 === 'checkout') return { page: 'checkout', parts: parts };
+    if (p0 === 'thanks' && parts[1]) return { page: 'thanks', parts: parts };
+    if (p0 === 'policy' || p0 === 'policies') return { page: 'policy', parts: parts };
     return { page: 'missing', parts: parts };
   }
 
@@ -1188,7 +1673,7 @@
 
   var TITLES = {
     home: 'Paws and Tails, pet food, pharmacy and care', all: 'Shop all', collections: 'Collections',
-    brands: 'Brands', search: 'Search', saved: 'Saved', bag: 'Your bag', help: 'Help', track: 'Track an order'
+    brands: 'Brands', search: 'Search', saved: 'Saved', bag: 'Your bag', help: 'Help', track: 'Track an order', checkout: 'Checkout', thanks: 'Thank you', policy: 'Policy'
   };
 
   function draw() {
@@ -1209,6 +1694,9 @@
     else if (r.page === 'bag') viewBag();
     else if (r.page === 'help') viewHelp();
     else if (r.page === 'track') viewTrack(r.parts[1] || '');
+    else if (r.page === 'checkout') viewCheckout();
+    else if (r.page === 'thanks') viewThanks(r.parts[1]);
+    else if (r.page === 'policy') viewPolicy(r.parts[1] || 'shipping');
     else {
       app.innerHTML = '<div class="wrap"><div class="empty"><h1>This page is not here</h1>' +
         '<p>The link may be old, or mistyped.</p><a class="btn" href="#/">Back to the front</a></div></div>';
@@ -1296,11 +1784,15 @@
     }
     else if (name === 'retryList') { e.preventDefault(); document.getElementById('listNote').innerHTML = ''; loadList(list.items.length === 0); }
     else if (name === 'reload') { e.preventDefault(); draw(); }
+    else if (name === 'coPlace') { e.preventDefault(); placeOrder(); }
+    else if (name === 'coEdit') { e.preventDefault(); openStep1(); }
     else if (name === 'retryTrack') { e.preventDefault(); runTrack(document.getElementById('tOrder').value, document.getElementById('tContact').value); }
     else if (name === 'openBag') { e.preventDefault(); state.drawer = true; renderDrawer(); refreshCart(); }
   });
 
   document.addEventListener('change', function (e) {
+    if (e.target && e.target.name === 'coRate') { co.rate = e.target.value; quote(co.rate); return; }
+    if (e.target && e.target.name === 'coPayBy') { co.pay = e.target.value; drawPay(); return; }
     var sort = e.target.closest('[data-act="sort"]');
     if (sort) { state.sort = sort.value; if (list.source) viewList(list.source); return; }
     var ss = e.target.closest('[data-act="searchSort"]');
@@ -1320,9 +1812,24 @@
 
   window.addEventListener('hashchange', draw);
 
+  /* Pincode first: guess the state so one less box needs filling. */
+  document.addEventListener('input', function (e) {
+    if (e.target && e.target.id === 'coZip') {
+      var pin = e.target.value.replace(/\D/g, '');
+      var st = document.getElementById('coState');
+      if (pin.length === 6 && st && !st.dataset.touched) { var g = stateOfPin(pin); if (g) st.value = g; }
+    }
+    if (e.target && e.target.id === 'coState') e.target.dataset.touched = '1';
+  });
+
   /* The assistant (assets/chat.js) shares these: the bag, the order card,
    * the remembered lookup and the delivery terms. */
   window.PTApp = {
+    payAndPlace: payAndPlace,
+    savedAddress: savedAddress,
+    keepAddress: keepAddress,
+    stateOfPin: stateOfPin,
+    setCart: function (cart) { state.cart = cart; updatePip(); if (state.drawer) renderDrawer(); if (route().page === 'bag') viewBag(); },
     quickAdd: quickAdd,
     orderCardHtml: orderCardHtml,
     rememberOrder: rememberOrder,

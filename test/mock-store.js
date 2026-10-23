@@ -56,7 +56,10 @@ FIXTURE.forEach((shelf, si) => {
     const n = 3 + ((si + ai) % 3);
     for (let k = 0; k < n; k++) {
       const idx = products.length + 1;
-      const brand = BRANDS[idx % BRANDS.length];
+      /* As in the live store: every product is listed under the store's own
+       * name, and the brand is only in the title. */
+      const brand = aisle.handle === 'royal-canin-dog-food' ? 'Royal Canin' : BRANDS[idx % BRANDS.length];
+      const label = aisle.label.replace(/^Royal Canin /, '');
       /* Deworming is priced as it is in real shops, a few hundred rupees, so
        * "best deworming under 500" has real answers to find. */
       const base = aisle.handle === 'deworming' ? 140 + k * 110 : 180 + ((idx * 137) % 9000);
@@ -66,12 +69,18 @@ FIXTURE.forEach((shelf, si) => {
       products.push({
         id: 'gid://shopify/Product/' + idx,
         handle: aisle.handle + '-item-' + (k + 1),
-        title: aisle.label + ' ' + (k === 0 ? 'everyday' : k === 1 ? 'premium' : 'value') + ' pack',
-        vendor: brand,
+        title: brand + ' ' + label + ' ' + (k === 0 ? 'everyday' : k === 1 ? 'premium' : 'value') + ' pack',
+        vendor: 'Paws & Tails\u2122',
+        brand: brand,
         productType: shelf.name,
         availableForSale: !soldOut,
         tags: ['Veg'],
-        descriptionHtml: '<p>Invented copy for the mock store. ' + aisle.label +
+        /* Store-written text links to the store's own domains, as real
+         * descriptions do; the site must turn those into its own pages. */
+        descriptionHtml: '<p>See also <a href="https://sg37v1-ta.myshopify.com/products/' + aisle.handle + '-item-1">the everyday pack</a>, ' +
+          '<a href="https://pawsandtails24.com/collections/' + aisle.handle + '">the whole range</a> and ' +
+          '<a href="https://sg37v1-ta.myshopify.com/cart">your cart</a>.</p>' +
+          '<p>Invented copy for the mock store. ' + aisle.label +
           ' from ' + brand + '.</p><ul><li>Not a real product</li><li>Prices are made up</li></ul>',
         aisles: [aisle.handle],
         variants: sizes.map((size, vi) => ({
@@ -170,6 +179,26 @@ function matches(p, term) {
   const hay = (p.title + ' ' + p.vendor + ' ' + p.productType).toLowerCase();
   const words = String(term || '').toLowerCase().replace(/\*/g, '').split(/\s+/).filter(Boolean);
   return words.every((w) => hay.indexOf(w) >= 0);
+}
+
+/* Enough of Shopify's query grammar for what the shop sends:
+ *   vendor:'X' OR (title:w1* AND title:w2*)   and plain prefix words. */
+function queryMatches(p, q) {
+  return String(q).split(/\s+OR\s+/i).some((clause) => {
+    const terms = clause.replace(/[()]/g, ' ').split(/\s+AND\s+|\s+/i).filter((x) => x && !/^and$/i.test(x));
+    let vendor = null;
+    const vm = clause.match(/vendor:'((?:[^'\\]|\\.)*)'/);
+    if (vm) vendor = vm[1].replace(/\\'/g, "'");
+    if (vendor !== null) return p.vendor.toLowerCase() === vendor.toLowerCase();
+    return terms.every((t) => {
+      const f = t.match(/^title:(.+)$/i);
+      if (f) {
+        const w = f[1].toLowerCase().replace(/\*$/, '');
+        return p.title.toLowerCase().split(/[^a-z0-9-]+/).some((x) => x.indexOf(w) === 0);
+      }
+      return matches(p, t);
+    });
+  });
 }
 
 /* -------------------------------------------------------------------- carts */
@@ -326,7 +355,6 @@ function resolve(op, v, query) {
 
   if (op === 'PtProducts') {
     const term = String(v.q || '').toLowerCase();
-    const brand = term.match(/^vendor:'(.*)'$/);
     const handles = String(v.q || '').match(/handle:"[^"]+"/g);
     let list;
     if (handles) {
@@ -334,11 +362,8 @@ function resolve(op, v, query) {
        * which is how the saved list is read back. */
       const wanted = handles.map((h) => h.slice(8, -1));
       list = products.filter((p) => wanted.indexOf(p.handle) >= 0);
-    } else if (brand) {
-      const name = brand[1].replace(/\\'/g, "'").toLowerCase();
-      list = products.filter((p) => p.vendor.toLowerCase() === name);
     } else {
-      list = products.filter((p) => matches(p, term));
+      list = products.filter((p) => queryMatches(p, term));
     }
     const start = v.after ? Number(v.after) : 0;
     return { products: {
@@ -428,15 +453,71 @@ const TYPES = {
   '.woff2': 'font/woff2'
 };
 
-/* Order lookups run the real api/order.js against a stand-in Admin API. */
+/* Order lookups and checkout run the real api/order.js and api/checkout.js
+ * against stand-ins for the Admin API and Razorpay, sharing one pretend
+ * store, so an order placed here can be tracked straight away. */
 const admin = require('./mock-admin.js')({ products: products });
-const orderApi = require(path.join(ROOT, 'api', 'order.js')).createHandler({ env: admin.env, fetchImpl: admin.fetch });
+const razorpay = require('./mock-razorpay.js')();
+const apiEnv = Object.assign({}, admin.env, razorpay.env);
+const apiFetch = (u, i) => (/razorpay\.com/.test(String(u)) ? razorpay.fetch(u, i) : admin.fetch(u, i));
+const orderApi = require(path.join(ROOT, 'api', 'order.js')).createHandler({ env: apiEnv, fetchImpl: apiFetch });
+const checkoutApi = require(path.join(ROOT, 'api', 'checkout.js')).createHandler({ env: apiEnv, fetchImpl: apiFetch });
+
+/* What Razorpay's popup does, in miniature: a sheet with Pay and Close.
+ * Pay asks this server to pay the order and hands the page the same three
+ * signed fields the real popup does. */
+const FAKE_CHECKOUT_JS = `window.Razorpay = function (o) {
+  this.open = function () {
+    var d = document.createElement('div');
+    d.id = 'mock-razorpay';
+    d.style.cssText = 'position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.5);display:grid;place-items:center';
+    d.innerHTML = '<div style="background:#fff;padding:24px;border-radius:8px;font:15px system-ui;display:grid;gap:12px;min-width:260px">' +
+      '<b>Mock Razorpay</b><span>Pay Rs ' + (o.amount / 100) + ' for ' + o.description + '</span>' +
+      '<button id="mrzp-pay">Pay</button><button id="mrzp-close">Close</button></div>';
+    document.body.appendChild(d);
+    d.querySelector('#mrzp-pay').onclick = function () {
+      fetch('/mock-razorpay/pay', { method: 'POST', body: JSON.stringify({ order_id: o.order_id }) })
+        .then(function (r) { return r.json(); }).then(function (r) { d.remove(); o.handler(r); });
+    };
+    d.querySelector('#mrzp-close').onclick = function () { d.remove(); if (o.modal && o.modal.ondismiss) o.modal.ondismiss(); };
+  };
+  this.on = function () {};
+};`;
+
+/* The page as shipped, told to load the stand-in Razorpay popup. */
+function homePage() {
+  return fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8')
+    .replace('</head>', '<script>window.PT_RAZORPAY_SCRIPT = "/mock-razorpay/checkout.js";</script>\n</head>');
+}
 
 const server = http.createServer((req, res) => {
   const url = String(req.url || '/').split('?')[0];
 
   if (url === '/api/order') {
     orderApi(req, res);
+    return;
+  }
+
+  if (url === '/api/checkout') {
+    checkoutApi(req, res);
+    return;
+  }
+
+  if (url === '/mock-razorpay/checkout.js') {
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' });
+    res.end(FAKE_CHECKOUT_JS);
+    return;
+  }
+
+  if (url === '/mock-razorpay/pay') {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let b = {};
+      try { b = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch (e) { /* ignore */ }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(razorpay.pay(b.order_id) || {}));
+    });
     return;
   }
 
@@ -484,10 +565,9 @@ const server = http.createServer((req, res) => {
 
   const target = url === '/' ? '/index.html' : url;
   const file = path.join(ROOT, target.replace(/^\/+/, ''));
-  if (!file.startsWith(ROOT) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
-    const home = fs.readFileSync(path.join(ROOT, 'index.html'));
+  if (target === '/index.html' || !file.startsWith(ROOT) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(home);
+    res.end(homePage());
     return;
   }
   res.writeHead(200, { 'Content-Type': TYPES[path.extname(file).toLowerCase()] || 'application/octet-stream' });
@@ -504,4 +584,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, products, PORT, admin, POLICY };
+module.exports = { server, products, PORT, admin, razorpay, POLICY };

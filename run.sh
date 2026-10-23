@@ -13,6 +13,12 @@ node test/test-storefront.js
 echo "==> order lookup"
 node test/test-order-api.js
 
+echo "==> checkout"
+node test/test-checkout-api.js
+
+echo "==> language"
+node test/test-nlu.js
+
 echo "==> assistant"
 node test/test-assistant.js
 

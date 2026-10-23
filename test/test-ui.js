@@ -78,6 +78,16 @@ async function waitPictures(page, scope) {
 
   const consoleErrors = [];
   const apiCalls = [];
+  /* The rule above all: a shopper never leaves this site. Every request and
+   * every page any tab loads, for the whole run, must be on the site itself. */
+  const offsite = [];
+  function guardSite(ctx) {
+    ctx.on('request', (r) => {
+      const u = r.url();
+      if (!u.startsWith(BASE) && !/^(data|blob|about):/.test(u)) offsite.push(u);
+    });
+  }
+  guardSite(context);
   page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
   page.on('pageerror', (e) => consoleErrors.push('pageerror: ' + e.message));
   page.on('request', (r) => { if (r.url().indexOf('/api/') >= 0) apiCalls.push(r.method() + ' ' + r.url()); });
@@ -189,9 +199,10 @@ async function waitPictures(page, scope) {
     eq('enter with nothing chosen runs the full search', await page.evaluate(() => location.hash), '#/search/premium');
     ok('with a count of results', /\d+ results? for "premium"/.test(await page.locator('#results .head h2').textContent()));
 
-    /* A brand is in the catalogue but not in product titles, so the store
-     * search finds nothing. The shop must still find it. */
-    const brand = products[0].vendor;
+    /* As in the live store, every product is listed under the store's own
+     * name and the brand is only in the title. Searching a brand must find
+     * that brand, and tiles must show it rather than the store's name. */
+    const brand = products[0].brand;
     await page.locator('#hq').fill(brand.slice(0, 5));
     await page.waitForSelector('#hsug a[href^="#/p/"]', { timeout: 10000 });
     ok('half a brand name still finds its products as you type', (await page.locator('#hsug a[href^="#/p/"]').count()) > 0);
@@ -200,6 +211,11 @@ async function waitPictures(page, scope) {
     ok('the full search falls back to the catalogue and finds the brand', (await page.locator('#listGrid .tile').count()) > 0);
     const brands = await page.locator('#listGrid .tile .brand').allTextContents();
     ok('and everything it found is that brand', brands.length > 0 && brands.every((b) => b.toLowerCase() === brand.toLowerCase()));
+    ok('no tile shows the store\'s own name as the brand', brands.every((b) => !/paws/i.test(b)));
+    await page.goto(BASE + '/#/brand/' + encodeURIComponent(brand), { waitUntil: 'networkidle' });
+    await page.waitForSelector('#listGrid .tile', { timeout: 10000 });
+    const onPage = await page.locator('#listGrid .tile .brand').allTextContents();
+    eq('a brand page lists that brand, read from titles', [onPage.length > 0, onPage.every((b) => b === brand)], [true, true]);
 
     await page.goto(BASE + '/#/search/zzqqxx', { waitUntil: 'networkidle' });
     await page.waitForSelector('.empty h1', { timeout: 10000 });
@@ -267,12 +283,100 @@ async function waitPictures(page, scope) {
     eq('every one of them is in the bag', (await page.locator('.pip').textContent()).trim(), String(sample.length));
 
     /* -------------------------------------------------------------- checkout */
-    section('checkout');
-    await page.locator('#bagBtn').click();
-    await page.waitForSelector('[data-act="checkout"]');
-    await page.locator('[data-act="checkout"]').click();
-    await page.waitForURL(/mock-checkout/, { timeout: 10000 });
-    ok('checkout leaves for the cart own checkout', /\/mock-checkout\//.test(page.url()));
+    section('checkout, on this site');
+    {
+      const coText = async () => (await page.locator('#coNote').textContent()) || '';
+      await page.locator('#bagBtn').click();
+      await page.waitForSelector('.drawer a[href="#/checkout"]');
+      await page.locator('.drawer a[href="#/checkout"]').click();
+      await page.waitForSelector('#coForm');
+      ok('Checkout opens a page here, not the store', /#\/checkout$/.test(page.url()));
+      ok('it starts with the address; delivery and payment wait', await page.locator('#coS2').isHidden() && await page.locator('#coS3').isHidden());
+      await page.locator('#coNext').click();
+      const errs = await page.locator('.cof .err:not(:empty)').count();
+      ok('Continue with nothing filled in points at every box that needs it (' + errs + ')', errs === 6);
+
+      await page.locator('#coName').fill('Asha Rao');
+      await page.locator('#coPhone').fill('98450 12345');
+      await page.locator('#coEmail').fill('asha@example.com');
+      await page.locator('#coAddr1').fill('12 Temple Road');
+      await page.locator('#coZip').fill('960001');
+      await page.locator('#coCity').fill('Faraway');
+      await page.locator('#coState').selectOption('KA');
+      await page.locator('#coNext').click();
+      await page.waitForFunction(() => /cannot deliver/.test((document.getElementById('coNote') || {}).textContent || ''), null, { timeout: 10000 });
+      ok('a pincode the store does not deliver to says so before anything is paid', /960001/.test(await coText()));
+
+      await page.locator('#coZip').fill('576101');
+      await page.locator('#coCity').fill('Udupi');
+      await page.locator('#coNext').click();
+      await page.waitForSelector('#coS3:not([hidden]) #coPlace', { timeout: 10000 });
+      ok('then delivery and payment open', await page.locator('#coS2').isVisible() && await page.locator('#coS3').isVisible());
+      ok('the address folds into one line with Change', /Asha Rao/.test(await page.locator('#coSum1').textContent()) && await page.locator('[data-act="coEdit"]').isVisible());
+      ok('delivery options come from the store', (await page.locator('input[name="coRate"]').count()) === 2);
+      ok('with an expected date', /Expected (between|by)/.test(await page.locator('#coEta').textContent()));
+      const totalOf = async () => Number(((await page.locator('.corows .tot .mono').textContent()) || '').replace(/[^\d]/g, ''));
+      const standard = await totalOf();
+      await page.locator('input[name="coRate"]').nth(1).check();
+      await page.waitForFunction((t) => Number(((document.querySelector('.corows .tot .mono') || {}).textContent || '').replace(/[^\d]/g, '')) !== t, standard, { timeout: 10000 });
+      ok('choosing express re-prices the total from the store', (await totalOf()) > standard);
+      ok('pay online is offered first', await page.locator('input[name="coPayBy"][value="online"]').isChecked());
+      ok('the button says the amount', new RegExp('Pay ₹').test(await page.locator('#coPlace').textContent()));
+
+      await page.locator('#coPlace').click();
+      await page.waitForSelector('#mock-razorpay', { timeout: 10000 });
+      ok('Razorpay opens on this page', /#\/checkout$/.test(page.url()));
+      await page.locator('#mrzp-close').click();
+      await page.waitForFunction(() => /not completed/.test((document.getElementById('coNote') || {}).textContent || ''), null, { timeout: 10000 });
+      ok('closing it says nothing was charged', /Nothing was charged/.test(await coText()));
+      await page.waitForFunction(() => !document.getElementById('coPlace').disabled, null, { timeout: 10000 });
+      await page.waitForTimeout(300);
+      ok('and the unpaid draft is cleared from the store', (mock.admin.stats.draftsDeleted || 0) >= 1);
+      eq('no order was placed', mock.admin.placed.length, 0);
+
+      await page.locator('#coPlace').click();
+      await page.waitForSelector('#mock-razorpay', { timeout: 10000 });
+      await page.locator('#mrzp-pay').click();
+      await page.waitForSelector('.thanks', { timeout: 15000 });
+      const placedName = mock.admin.placed[mock.admin.placed.length - 1].name;
+      ok('paying places the order and says thank you, on this site', new RegExp('#/thanks/' + placedName.slice(1) + '$').test(page.url()));
+      ok('with the order number and the amount paid', new RegExp(placedName).test(await page.locator('.thanks').textContent()) && /Paid ₹/.test(await page.locator('.thanks').textContent()));
+      eq('in the store as paid', mock.admin.placed[mock.admin.placed.length - 1].displayFinancialStatus, 'PAID');
+      eq('the bag is empty again', await page.locator('.pip').count(), 0);
+      await page.locator('.thanks a', { hasText: 'Track this order' }).click();
+      await page.waitForSelector('.ocard', { timeout: 10000 });
+      ok('Track this order shows it straight away, no questions', new RegExp(placedName).test(await page.locator('.ohead').textContent()));
+
+      section('cash on delivery');
+      const one = products.find((p) => p.availableForSale && p.variants.length === 1);
+      await page.goto(BASE + '/#/p/' + one.handle, { waitUntil: 'networkidle' });
+      await page.waitForSelector('[data-act="buy"]');
+      await page.locator('[data-act="buy"]').click();
+      await page.waitForSelector('#coForm', { timeout: 10000 });
+      ok('Buy it now goes straight to checkout here', /#\/checkout$/.test(page.url()));
+      eq('the address from last time is filled in', await page.locator('#coName').inputValue(), 'Asha Rao');
+      await page.locator('#coNext').click();
+      await page.waitForSelector('#coS3:not([hidden]) #coPlace', { timeout: 10000 });
+      await page.locator('input[name="coPayBy"][value="cod"]').check();
+      ok('cash on delivery says what to pay on arrival', /on delivery/.test(await page.locator('#coPlace').textContent()));
+      await page.locator('#coPlace').click();
+      await page.waitForSelector('.thanks', { timeout: 15000 });
+      ok('the order is placed with no payment window', /in cash when it arrives/.test(await page.locator('.thanks').textContent()));
+      eq('in the store as payment pending', mock.admin.placed[mock.admin.placed.length - 1].displayFinancialStatus, 'PENDING');
+
+      section('store pages, shown here');
+      await page.goto(BASE + '/', { waitUntil: 'networkidle' });
+      eq('the footer\'s shipping link stays on the site', await page.locator('footer a', { hasText: 'Shipping' }).getAttribute('href'), '#/policy/shipping');
+      await page.locator('footer a', { hasText: 'Shipping' }).click();
+      await page.waitForSelector('.polbody', { timeout: 10000 });
+      ok('and shows the store\'s shipping page', /dispatched within/.test(await page.locator('.polbody').textContent()));
+      await page.goto(BASE + '/#/p/' + good.handle, { waitUntil: 'networkidle' });
+      await page.waitForSelector('details.expand');
+      const links = await page.locator('details.expand .inner a').evaluateAll((as) => as.map((a) => a.getAttribute('href')));
+      ok('links in product text to the store become this site\'s pages (' + links.join(', ') + ')',
+        links.length >= 2 && links.every((h) => /^(#\/|tel:|mailto:|https:\/\/wa\.me)/.test(h)));
+      ok('and a link with no page here becomes plain text', !(await page.locator('details.expand .inner a', { hasText: 'your cart' }).count()));
+    }
 
     /* -------------------------------------------------------------- sold out */
     section('sold out');
@@ -313,6 +417,8 @@ async function waitPictures(page, scope) {
     {
       await page.goto(BASE + '/', { waitUntil: 'networkidle' });
       eq('the header link opens the track page', await page.locator('.announce a', { hasText: 'Track an order' }).getAttribute('href'), '#/track');
+      /* As a new visitor: nothing remembered from the orders placed above. */
+      await page.evaluate(() => { try { sessionStorage.removeItem('pt_track'); } catch (e) { /* ignore */ } });
       await page.goto(BASE + '/#/track', { waitUntil: 'networkidle' });
       ok('it starts with just the two boxes', (await page.locator('#trackForm input').count()) === 2 && (await page.locator('.ocard').count()) === 0);
       await page.locator('#tOrder').fill('#1002');
@@ -351,12 +457,12 @@ async function waitPictures(page, scope) {
     section('the assistant');
     {
       await page.goto(BASE + '/#/c/dog-food', { waitUntil: 'networkidle' });
-      await page.evaluate(() => { try { sessionStorage.removeItem('pt_chat'); } catch (e) { /* ignore */ } });
+      await page.evaluate(() => { try { sessionStorage.removeItem('pt_chat_v2'); } catch (e) { /* ignore */ } });
       await page.reload({ waitUntil: 'networkidle' });
       ok('a button in the corner opens it', await page.locator('.cl-launch').isVisible());
       await page.locator('.cl-launch').click();
       await page.waitForSelector('.cl-panel:not([hidden]) .cl-row.bot');
-      ok('it says what it can do', /track an order/i.test(await page.locator('.cl-log').textContent()));
+      ok('it says what it can do', /place your order/i.test(await page.locator('.cl-log').textContent()) && /track/i.test(await page.locator('.cl-log').textContent()));
       ok('with quick replies', (await page.locator('.cl-chip').count()) >= 3);
       await page.locator('.cl-chip', { hasText: 'Best deworming' }).click();
       await page.waitForSelector('.cprod', { timeout: 10000 });
@@ -365,9 +471,11 @@ async function waitPictures(page, scope) {
         prices.length > 0 && prices.length <= 3 && prices.every((t) => Number(t.replace(/[^\d]/g, '')) <= 500));
       ok('ranked by what sells, and says so', /sells most/i.test(await page.locator('.cl-log').textContent()));
       const pipBefore = Number(await page.locator('.pip').textContent());
-      await page.locator('.cprod [data-quick]').first().click();
+      await page.locator('.cprod button.cp-add:not(.alt)').first().click();
       await page.waitForFunction((n) => Number((document.querySelector('.pip') || {}).textContent || 0) === n + 1, pipBefore, { timeout: 10000 });
       ok('a card goes straight into the bag', true);
+      await page.waitForFunction(() => !document.querySelector('.cl-typing'), null, { timeout: 10000 });
+      ok('and the chat says so, with the bag total', /Added/.test(await page.locator('.cl-row.bot').nth(-2).textContent()) && (await page.locator('.cl-bagmini').count()) === 1);
 
       const say = async (t) => {
         const n = await page.locator('.cl-row.bot').count();
@@ -396,6 +504,89 @@ async function waitPictures(page, scope) {
       ok('and the button comes back', await page.locator('.cl-launch').isVisible());
     }
 
+    /* ---------------------------------------------- ordering in the chat */
+    section('ordering in the chat');
+    {
+      const chatSay = async (t) => {
+        const n = await page.locator('.cl-row.bot:not(.cl-typing)').count();
+        await page.locator('.cl-input').fill(t);
+        await page.locator('.cl-input').press('Enter');
+        await page.waitForFunction((k) => document.querySelectorAll('.cl-row.bot:not(.cl-typing)').length > k && !document.querySelector('.cl-typing'), n, { timeout: 15000 });
+      };
+      const chatTap = async (loc) => {
+        const n = await page.locator('.cl-row.bot:not(.cl-typing)').count();
+        await loc.click();
+        await page.waitForFunction((k) => document.querySelectorAll('.cl-row.bot:not(.cl-typing)').length > k && !document.querySelector('.cl-typing'), n, { timeout: 15000 });
+      };
+      await page.evaluate(() => { try { localStorage.removeItem('pt_address'); } catch (e) { /* ignore */ } });
+      await page.goto(BASE + '/#/c/dog-food', { waitUntil: 'networkidle' });
+      if (await page.locator('.cl-panel').isHidden()) await page.locator('.cl-launch').click();
+      await page.locator('.cl-new').click();
+      ok('New chat starts the conversation again', (await page.locator('.cl-row').count()) === 1);
+      await page.evaluate(() => window.PTStorefront.forgetCart());
+      await page.reload({ waitUntil: 'networkidle' });
+      if (await page.locator('.cl-panel').isHidden()) await page.locator('.cl-launch').click();
+      const placedBefore = mock.admin.placed.length;
+
+      await chatSay('can you place an order for acana');
+      const names = await page.locator('.cl-row.bot').last().locator('.cprod .cp-name').allTextContents();
+      ok('the request from the screenshot finds Acana (' + names.length + ')', names.length >= 2 && names.every((t) => /^Acana /.test(t)));
+      await chatTap(page.locator('.cl-row.bot').last().locator('.cprod .cp-add').nth(1));
+      ok('Choose size shows the sizes in the chat', (await page.locator('.cl-detail:not(.used) .cd-size').count()) >= 2);
+      await chatTap(page.locator('.cl-detail:not(.used) .cd-size').nth(1));
+      ok('a size goes into the bag', /Added .*\(1 kg\)/.test(await page.locator('.cl-log').textContent()) && Number(await page.locator('.pip').textContent()) === 1);
+      ok('and that size picker stops working', (await page.locator('.cl-detail.used').count()) >= 1);
+      await chatSay('make it 2');
+      eq('"make it 2" updates the header count too', Number(await page.locator('.pip').textContent()), 2);
+
+      await chatTap(page.locator('.cl-chip', { hasText: 'Checkout' }));
+      ok('Checkout opens an address form in the chat', (await page.locator('.cl-addr:not(.used)').count()) === 1);
+      await chatTap(page.locator('.cl-addr:not(.used) .ca-go'));
+      ok('Continue with nothing filled in marks what is missing', (await page.locator('.cl-addr:not(.used) .ca-f.bad').count()) >= 5);
+      const f = page.locator('.cl-addr:not(.used)');
+      await f.locator('[name=name]').fill('Asha Rao');
+      await f.locator('[name=phone]').fill('98450 12345');
+      await f.locator('[name=address1]').fill('12 Temple Road');
+      await f.locator('[name=zip]').fill('576101');
+      eq('the pincode fills the state', await f.locator('[name=state]').inputValue(), 'KA');
+      await f.locator('[name=city]').fill('Udupi');
+      await chatTap(f.locator('.ca-go'));
+      const sum = page.locator('.cl-sum:not(.used)');
+      ok('then the order summary, priced by the store', (await sum.count()) === 1 && /Total/.test(await sum.textContent()));
+      ok('it opens at its start, so it is read from the top', await page.evaluate(() => {
+        const log = document.querySelector('.cl-log'); const rows = log.querySelectorAll('.cl-row.bot');
+        const first = rows[rows.length - 2]; return first.offsetTop - log.scrollTop < 40 && first.offsetTop - log.scrollTop > -5;
+      }));
+      const total1 = await sum.locator('.grand .mono').textContent();
+      await chatTap(sum.locator('.co-opt', { hasText: 'Express' }));
+      const sum2 = page.locator('.cl-sum:not(.used)');
+      ok('choosing express re-prices it', (await sum2.locator('.grand .mono').textContent()) !== total1);
+      ok('and the old summary can no longer be used', await page.locator('.cl-sum.used .cs-place').first().isDisabled());
+      await chatTap(sum2.locator('.co-opt', { hasText: 'Cash on delivery' }));
+      ok('the button says what will happen', /on delivery/.test(await page.locator('.cl-sum:not(.used) .cs-place').textContent()));
+      eq('nothing is placed before the button', mock.admin.placed.length, placedBefore);
+      await chatTap(page.locator('.cl-sum:not(.used) .cs-place'));
+      await page.waitForSelector('.cl-placed', { timeout: 15000 });
+      const placedName = mock.admin.placed[mock.admin.placed.length - 1].name;
+      ok('the order is placed, in the chat', new RegExp(placedName).test(await page.locator('.cl-placed').last().textContent()));
+      eq('cash on delivery, in the store', mock.admin.placed[mock.admin.placed.length - 1].displayFinancialStatus, 'PENDING');
+      eq('the bag in the header is empty', await page.locator('.pip').count(), 0);
+      ok('and the chat stayed on this page', /#\/c\/dog-food$/.test(page.url()));
+
+      const one = products.find((p) => p.availableForSale && p.variants.length === 1);
+      await chatSay('buy ' + one.title);
+      await chatTap(page.locator('.cl-chip', { hasText: 'Checkout' }));
+      ok('next time the address is offered as saved', (await page.locator('.cl-saved:not(.used)').count()) === 1);
+      await chatTap(page.locator('.cl-saved:not(.used) .cs-yes'));
+      await page.locator('.cl-sum:not(.used) .cs-place').click();
+      await page.waitForSelector('#mock-razorpay', { timeout: 10000 });
+      ok('paying online opens Razorpay over the chat', /Pay Rs/.test(await page.locator('#mock-razorpay').textContent()));
+      await page.locator('#mrzp-pay').click();
+      await page.waitForSelector('.cl-placed >> nth=1', { timeout: 15000 });
+      eq('paid, in the store', mock.admin.placed[mock.admin.placed.length - 1].displayFinancialStatus, 'PAID');
+      ok('the chat says it was paid', /Paid/.test(await page.locator('.cl-placed').last().textContent()));
+    }
+
     /* ------------------------------------------------------------------ phone */
     section('on a phone');
     await page.setViewportSize({ width: 390, height: 844 });
@@ -416,11 +607,11 @@ async function waitPictures(page, scope) {
     await waitPictures(page, '#listGrid .tile .shot img');
     const phoneGrid = sameSize(await page.evaluate(pictureGeometry, '#listGrid .tile .shot img'), 0.70);
     eq('on a phone every product is the same size too, clear of the heart' + (phoneGrid.length ? ': ' + phoneGrid.slice(0, 2).join(' | ') : ''), phoneGrid.length, 0);
-    await page.locator('.cl-launch').click();
+    if (await page.locator('.cl-panel').isHidden()) await page.locator('.cl-launch').click();
     await page.waitForSelector('.cl-panel:not([hidden])');
     const panel = await page.locator('.cl-panel').boundingBox();
     ok('on a phone the assistant fills the screen', panel && Math.round(panel.width) === 390 && Math.round(panel.height) >= 800);
-    await page.locator('.cl-x').click();
+    await page.locator('.cl-x[data-chat="close"]').click();
     ok('and closes back to the page', await page.locator('.cl-panel').isHidden());
     const spill = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     ok('nothing spills sideways on a 390 point screen', spill <= 1);
@@ -439,6 +630,7 @@ async function waitPictures(page, scope) {
       /* The measuring copy is a CORS request; refuse it the way a server
        * without CORS headers would. The pictures themselves still load. */
       const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+      guardSite(ctx2);
       const p2 = await ctx2.newPage();
       await p2.route('**/mock-img/**', async (route) => {
         const h = await route.request().allHeaders();
@@ -453,6 +645,9 @@ async function waitPictures(page, scope) {
       ok('photos that cannot be measured still show, as they were', fallback.length > 0 && fallback.every((f) => !f.placed && f.loaded));
       await ctx2.close();
     }
+
+    section('never off the site');
+    eq('no request or page, in any tab, left this site' + (offsite.length ? ': ' + offsite.slice(0, 3).join(' | ') : ''), offsite.length, 0);
 
     section('console');
     eq('nothing was logged as an error' + (consoleErrors.length ? ': ' + consoleErrors.slice(0, 3).join(' | ') : ''), consoleErrors.length, 0);

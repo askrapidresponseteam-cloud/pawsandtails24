@@ -5,15 +5,15 @@
  * store's own Shopify Storefront API at request time. Nothing is baked into
  * the page, so a price change in Shopify is the price the next visitor sees.
  *
- * Orders are placed by Shopify, not by this file. The bag IS a Shopify cart
- * (cartCreate / cartLinesAdd / cartLinesUpdate / cartLinesRemove), so it is
- * held on their servers against live inventory, and "Checkout" sends the
- * buyer to that cart's own checkoutUrl. Payment, delivery charge, tax invoice,
- * stock and the order record are all Shopify's. This file never sees a card.
+ * Shoppers never leave this site. The bag is a Shopify cart (cartCreate /
+ * cartLinesAdd / cartLinesUpdate / cartLinesRemove), held by the store against
+ * live inventory. Checkout is a page here: api/checkout.js prices the bag with
+ * the store and places the order in it, and online payment opens Razorpay's
+ * popup on this page. This file never sees a card.
  *
  * Transport: same origin. The API is called at /api/<version>/graphql.json,
- * a relative path, so when this is served from pawsandtails24.com the browser
- * treats it as the store's own API and no CORS, key or proxy is involved.
+ * a relative path; vercel.json forwards it to the store on the server side, so
+ * the browser only ever talks to this site.
  * For local work, dev/serve.js forwards that path to the live store, which is
  * what makes a laptop look like the same origin. If the store ever asks for a
  * public Storefront token, put it in config.token and it is sent as the
@@ -39,7 +39,12 @@
     version: '2026-01',
     token: '',
     fetchImpl: null,
-    storage: null
+    storage: null,
+    /* Known brands, and the vendor names that mean "the store itself". The
+     * live store lists every product under its own name, so the brand is
+     * read from the title instead. */
+    brands: [],
+    ownVendor: /^paws\s*(&|and)?\s*tails/i
   };
 
   function configure(opts) {
@@ -222,6 +227,30 @@
     return p === null ? '' : money(p);
   }
 
+  /* ================================================================= BRANDS */
+
+  function escRx(t) { return String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  /** A known brand named in a title, preferring one at the start. */
+  function brandInTitle(title) {
+    var t = String(title || '');
+    var best = null;
+    (config.brands || []).forEach(function (b) {
+      var m = new RegExp('(^|[^a-z0-9])' + escRx(b) + '(?![a-z0-9])', 'i').exec(t);
+      if (!m) return;
+      var at = m.index + m[1].length;
+      if (!best || at < best.at || (at === best.at && b.length > best.b.length)) best = { b: b, at: at };
+    });
+    return best ? best.b : '';
+  }
+
+  /** The brand to show: the vendor, unless the vendor is the store itself. */
+  function brandOf(vendor, title) {
+    var v = String(vendor || '').trim();
+    if (v && !config.ownVendor.test(v)) return v;
+    return brandInTitle(title);
+  }
+
   /* ============================================================== CATALOGUE */
 
   var TILE_FIELDS =
@@ -258,7 +287,7 @@
       id: node.id,
       handle: node.handle,
       title: String(node.title || '').trim(),
-      brand: String(node.vendor || '').trim(),
+      brand: brandOf(node.vendor, node.title),
       type: String(node.productType || '').trim(),
       available: node.availableForSale !== false,
       image: (node.featuredImage && node.featuredImage.url) || null,
@@ -335,8 +364,17 @@
   function brandPage(brand, opts) {
     opts = opts || {};
     var sort = SORTS[opts.sort] || SORTS.featured;
-    var q = "vendor:'" + String(brand || '').replace(/\\/g, '').replace(/'/g, "\\'") + "'";
-    return productsQuery(q, sort, opts, 'brand|' + brand);
+    /* The vendor, or every word of the brand at the start of a title word:
+     * the live store lists everything under its own name. */
+    var name = String(brand || '').replace(/\\/g, '');
+    var words = name.toLowerCase().replace(/["'\\:()\[\]{}<>!^~*?]/g, ' ').split(/\s+/).filter(Boolean);
+    var q = "vendor:'" + name.replace(/'/g, "\\'") + "'" +
+      (words.length ? ' OR (' + words.map(function (w) { return 'title:' + w + '*'; }).join(' AND ') + ')' : '');
+    return productsQuery(q, sort, opts, 'brand|' + brand).then(function (page) {
+      var want = name.toLowerCase();
+      page.products = page.products.filter(function (p) { return p.brand.toLowerCase() === want; });
+      return page;
+    });
   }
 
   function productsQuery(q, sort, opts, keyPrefix) {
@@ -488,7 +526,7 @@
           id: p.id,
           handle: p.handle,
           title: String(p.title || '').trim(),
-          brand: String(p.vendor || '').trim(),
+          brand: brandOf(p.vendor, p.title),
           type: String(p.productType || '').trim(),
           descriptionHtml: String(p.descriptionHtml || ''),
           tags: (p.tags || []).map(String),
@@ -623,7 +661,7 @@
    * so a bag opened on a laptop and paid on a phone cannot disagree. */
 
   var CART_FIELDS =
-    ' id checkoutUrl totalQuantity' +
+    ' id totalQuantity' +
     ' cost { subtotalAmount { amount currencyCode } totalAmount { amount } }' +
     ' lines(first: 100) { nodes {' +
     '  id quantity' +
@@ -649,7 +687,7 @@
         variantId: v.id,
         handle: String(pr.handle || ''),
         title: String(pr.title || ''),
-        brand: String(pr.vendor || ''),
+        brand: brandOf(pr.vendor, pr.title),
         variantTitle: String(v.title || '').replace(/^Default Title$/, ''),
         qty: l.quantity || 0,
         available: v.availableForSale === true,
@@ -662,7 +700,6 @@
     }).filter(Boolean);
     return {
       id: cart.id,
-      checkoutUrl: cart.checkoutUrl || null,
       count: cart.totalQuantity || 0,
       subtotalPaise: paise(cart.cost && cart.cost.subtotalAmount && cart.cost.subtotalAmount.amount),
       lines: lines
@@ -838,17 +875,18 @@
       .then(function (d) {
         d = d || {};
         var shop = d.shop || {};
-        function pick(page, pol, path) {
-          var text = plainText(page && page.body) || plainText(pol && pol.body);
-          return { text: text, url: page && page.body ? shopUrl(path) : ((pol && pol.url) || shopUrl(path)) };
+        /* Shown on this site at #/policy/..., never on the store's own domain. */
+        function pick(page, pol, key) {
+          var html = (page && page.body) || (pol && pol.body) || '';
+          return { text: plainText(html), html: String(html), url: '#/policy/' + key };
         }
         return {
-          shipping: pick(d.ship, shop.shippingPolicy, shipPath),
-          refund: pick(d.refund, shop.refundPolicy, refundPath)
+          shipping: pick(d.ship, shop.shippingPolicy, 'shipping'),
+          refund: pick(d.refund, shop.refundPolicy, 'returns')
         };
       })
       .catch(function () {
-        return { shipping: { text: '', url: shopUrl(shipPath) }, refund: { text: '', url: shopUrl(refundPath) } };
+        return { shipping: { text: '', html: '', url: '#/policy/shipping' }, refund: { text: '', html: '', url: '#/policy/returns' } };
       });
   }
 
@@ -873,6 +911,31 @@
       });
     }, function () {
       throw StorefrontError('Could not reach the order desk. Check your connection and try again.');
+    });
+  }
+
+  /* =============================================================== CHECKOUT
+   * Checkout happens on this site: api/checkout.js prices the bag with the
+   * store and places the order in it. Business answers ("sold out", "we do
+   * not deliver there") come back as { ok: false, error }; only a failure to
+   * reach the server throws. */
+
+  function checkout(action, payload) {
+    var body = {};
+    Object.keys(payload || {}).forEach(function (k) { body[k] = payload[k]; });
+    body.action = action;
+    return fetcher()(config.apiBase + '/api/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (j) {
+        j = j || {};
+        if (res.status === 200) return j;
+        throw StorefrontError(j.error || 'Checkout is not answering right now. Nothing was charged. Try again in a moment.', res.status);
+      });
+    }, function () {
+      throw StorefrontError('Could not reach checkout. Check your connection; nothing was charged.');
     });
   }
 
@@ -916,6 +979,7 @@
     searchAll: searchAll,
     policies: policies,
     orderLookup: orderLookup,
+    checkout: checkout,
     plainText: plainText,
 
     cartGet: cartGet,
@@ -933,6 +997,7 @@
     sized: sized,
     shopUrl: shopUrl,
     prefixQuery: prefixQuery,
+    brandOf: brandOf,
 
     /* exposed for the tests */
     _tileOf: tileOf,

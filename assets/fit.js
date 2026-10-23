@@ -29,7 +29,10 @@
     ['.suggests .shot', 0.86],
     ['.sugs .thumb', 0.86],
     ['.cprod .shot', 0.86],
-    ['.oitem .shot', 0.86]
+    ['.oitem .shot', 0.86],
+    ['.coline .shot', 0.86],
+    ['.cd-top .shot', 0.86],
+    ['.cb-line .shot', 0.86]
   ];
   var PROBE_WIDTH = 200;
   var REVEAL_AFTER_MS = 2500;

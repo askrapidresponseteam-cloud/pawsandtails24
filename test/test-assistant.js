@@ -57,7 +57,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     'where is my order': 'track', 'track #1042': 'track', 'has my order shipped?': 'track',
     'when will it arrive if I order today': 'delivery', 'do you deliver to 576101': 'delivery',
     'what are the shipping charges': 'fee', 'is cash on delivery available': 'pay',
-    'I want to return a damaged item': 'returns', 'cancel my order': 'cancel',
+    'I want to return a damaged item': 'returns', 'cancel my order': 'cancelOrder',
     'talk to a person': 'human', 'hi': 'greet', 'thanks!': 'thanks'
   };
   Object.keys(cases).forEach((q) => eq('"' + q + '"', A.classify(q, {}), cases[q]));
@@ -91,7 +91,9 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
 
   /* ------------------------------------------------- whole conversations */
   await new Promise((r) => mock.server.listen(PORT, r));
-  S.configure({ apiBase: 'http://localhost:' + PORT, version: C.apiVersion, quiet: true });
+  const memory = new Map();
+  S.configure({ apiBase: 'http://localhost:' + PORT, version: C.apiVersion, quiet: true, brands: C.brands,
+    storage: { getItem: (k) => (memory.has(k) ? memory.get(k) : null), setItem: (k, v) => memory.set(k, v), removeItem: (k) => memory.delete(k) } });
   const cols = () => S.collections().then((l) => l.filter((c) => c.hasProducts && C.hidden.indexOf(c.handle) < 0));
   const fresh = () => A.create({ S: S, C: C, collections: cols, now: () => thu });
 
@@ -123,7 +125,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     ok('a price range keeps to it', cardsOf(range).length > 0 && cardsOf(range).every((p) => p.paise >= 100000 && p.paise <= 200000));
 
     const brand = await bot.reply('drools');
-    ok('a brand finds that brand', cardsOf(brand).length > 0 && cardsOf(brand).every((p) => p.brand === 'Drools'));
+    ok('a brand finds that brand, though the store lists everything under its own name', cardsOf(brand).length > 0 && cardsOf(brand).every((p) => p.brand === 'Drools'));
 
     const puppy = await bot.reply('food for my puppy');
     ok('a puppy asks for puppy food', /puppy food/i.test(textOf(puppy)));
@@ -176,10 +178,184 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     ok('cash on delivery from the same page', /Cash on delivery is available/.test(textOf(r)));
     r = await bot.reply('can I return an opened pack');
     ok('returns from the returns page', /returned within 7 days/.test(textOf(r)));
-    ok('with a link to the full policy', r.blocks.some((b) => b.type === 'links'));
+    const pol = r.blocks.find((b) => b.type === 'links');
+    eq('with a link to the full policy, on this site', pol && pol.links[0].href, '#/policy/returns');
     r = await bot.reply('talk to a person');
     const links = (r.blocks.find((b) => b.type === 'links') || { links: [] }).links.map((l) => l.href);
     ok('a person: WhatsApp, phone and email', links.some((h) => /wa\.me/.test(h)) && links.some((h) => /^tel:/.test(h)) && links.some((h) => /^mailto:/.test(h)));
+  }
+
+  /* ------------------------------------------------ ordering in the chat */
+
+  /* The page side of placing an order, as app.js does it, with the stand-in
+   * Razorpay playing the shopper paying (or closing the popup). */
+  function shopFor(opts) {
+    opts = opts || {};
+    let saved = opts.saved || null;
+    const calls = { place: 0, setCart: 0 };
+    return {
+      calls,
+      savedAddress: () => saved,
+      keepAddress: (a) => { saved = a; },
+      setCart: () => { calls.setCart++; },
+      stateOfPin: (pin) => (/^5[6-9]/.test(pin) ? 'KA' : /^7/.test(pin) ? 'WB' : ''),
+      place: async (p) => {
+        calls.place++;
+        calls.last = p;
+        const r = await S.checkout('place', p);
+        if (!r.ok) return r.changed ? { ok: false, changed: true, quote: r, error: r.error } : { ok: false, error: r.error, fields: r.fields || null };
+        if (r.placed) { S.forgetCart(); return { ok: true, order: r.order }; }
+        if (opts.dismiss) { await S.checkout('abandon', { razorpay_order_id: r.pay.orderId }); return { ok: false, dismissed: true, error: 'Payment not completed. Nothing was charged.' }; }
+        const c = await S.checkout('confirm', mock.razorpay.pay(r.pay.orderId));
+        if (c.ok) S.forgetCart();
+        return c.ok ? { ok: true, order: c.order } : { ok: false, error: c.error };
+      }
+    };
+  }
+  const buyer = (shop) => { S.forgetCart(); return A.create({ S: S, C: C, collections: cols, now: () => thu, shop: shop }); };
+  const blockOf = (r, type) => r.blocks.find((b) => b.type === type) || null;
+  const ADDR = { name: 'Asha Rao', phone: '98450 12345', address1: '12 Temple Road', zip: '576101', city: 'Udupi' };
+  const acana = mock.products.filter((p) => p.brand === 'Acana' && p.availableForSale);
+
+  section('ordering in the chat: the request from the screenshot');
+  {
+    const shop = shopFor();
+    const bot = buyer(shop);
+    let r = await bot.reply('can you place an order for acana');
+    const choices = cardsOf(r);
+    ok('"can you place an order for acana" finds Acana, though the store lists it under its own name', choices.length >= 2 && choices.every((p) => p.brand === 'Acana'));
+    ok('and asks which one', /Which Acana would you like/.test(textOf(r)));
+    r = await bot.reply('the second one');
+    const detail = blockOf(r, 'detail');
+    ok('"the second one" opens its sizes', detail && detail.product.handle === choices[1].handle && /Which size/.test(textOf(r)));
+    r = await bot.reply('1 kg');
+    const v1kg = acana.find((p) => p.handle === choices[1].handle).variants.find((v) => v.title === '1 kg');
+    ok('"1 kg" puts that size in the bag', /Added .*\(1 kg\) to your bag/.test(textOf(r)) && blockOf(r, 'bag').count === 1);
+    ok('and tells the page the bag changed', shop.calls.setCart > 0);
+    r = await bot.reply('make it 2');
+    eq('"make it 2" changes the quantity of what was just added', [blockOf(r, 'bag').count, blockOf(r, 'bag').subtotal], [2, Math.round(Number(v1kg.price.amount) * 100) * 2]);
+    r = await bot.reply('checkout');
+    ok('checkout asks where it should go', blockOf(r, 'address') && /Where should it go/.test(textOf(r)));
+    r = await bot.act({ t: 'address', a: { name: 'A', phone: '123', address1: '', zip: '12', city: '' } });
+    const errs = blockOf(r, 'address').errors;
+    eq('a bad address comes back with each problem named', Object.keys(errs).sort(), ['address1', 'city', 'name', 'phone', 'state', 'zip']);
+    eq('and nothing is priced or placed', shop.calls.place, 0);
+    r = await bot.act({ t: 'address', a: ADDR });
+    const sum = blockOf(r, 'summary');
+    ok('a good address gives the order summary, priced by the store', sum && sum.total > 0 && sum.rates.length === 2);
+    ok('the state was worked out from the pincode', sum.address.state === 'KA');
+    ok('it says nothing is charged until the button', /Nothing is charged until you tap/.test(textOf(r)));
+    eq('and nothing has been placed yet', shop.calls.place, 0);
+    r = await bot.reply('express');
+    const sum2 = blockOf(r, 'summary');
+    ok('"express" re-prices with express delivery', sum2.rate === 'mock-express' && sum2.total === sum.total + 14900 - sum.shipping);
+    r = await bot.reply('cash on delivery');
+    eq('"cash on delivery" switches the payment', blockOf(r, 'summary').payment, 'cod');
+    r = await bot.act({ t: 'place', ref: sum.ref });
+    ok('an out of date summary cannot place the order', /out of date/.test(textOf(r)) && shop.calls.place === 0);
+    r = await bot.reply('yes');
+    const placed = blockOf(r, 'placed');
+    ok('"yes" places it', placed && /^#\d+$/.test(placed.order.name));
+    eq('for the total that was shown, cash on delivery', [placed.order.total, placed.order.payment, shop.calls.last.expectTotal], [blockOf(await Promise.resolve({ blocks: [sum2] }), 'summary').total, 'cod', sum2.total]);
+    const inStore = mock.admin.placed[mock.admin.placed.length - 1];
+    eq('the store has it, payment pending, with what was chosen', [inStore.name, inStore.displayFinancialStatus, inStore.lineItems.nodes[0].quantity], [placed.order.name, 'PENDING', 2]);
+    r = await bot.reply('where is my order');
+    ok('"where is my order" then knows which one', blockOf(r, 'order') && blockOf(r, 'order').order.name === placed.order.name);
+  }
+
+  section('paying online in the chat');
+  {
+    const shop = shopFor({ saved: Object.assign({ state: 'KA' }, ADDR, { phone: '9845012345' }) });
+    const bot = buyer(shop);
+    const one = mock.products.find((p) => p.availableForSale && p.variants.length === 1);
+    let r = await bot.reply('buy 2 ' + one.title);
+    ok('a clear match with one size goes straight into the bag, with the quantity', /Added 2 x/.test(textOf(r)) && blockOf(r, 'bag').count === 2);
+    r = await bot.reply('checkout');
+    ok('a saved address is offered first', blockOf(r, 'savedAddress') && blockOf(r, 'savedAddress').address.name === 'Asha Rao');
+    r = await bot.reply('yes');
+    const sum = blockOf(r, 'summary');
+    eq('online payment is the default when Razorpay is on', sum.payment, 'online');
+    r = await bot.act({ t: 'place', ref: sum.ref });
+    const placed = blockOf(r, 'placed');
+    ok('paid and placed', placed && placed.order.payment === 'online' && /^Paid/.test(textOf(r)));
+    eq('in the store as paid', mock.admin.placed[mock.admin.placed.length - 1].displayFinancialStatus, 'PAID');
+    r = await bot.reply('checkout');
+    ok('the bag is empty afterwards', /bag is empty/i.test(textOf(r)));
+  }
+
+  section('when the payment window is closed');
+  {
+    const shop = shopFor({ saved: Object.assign({ state: 'KA' }, ADDR, { phone: '9845012345' }), dismiss: true });
+    const bot = buyer(shop);
+    const one = mock.products.find((p) => p.availableForSale && p.variants.length === 1);
+    await bot.reply('buy ' + one.title);
+    await bot.reply('checkout');
+    let r = await bot.reply('yes');
+    const sum = blockOf(r, 'summary');
+    const before = mock.admin.placed.length;
+    r = await bot.act({ t: 'place', ref: sum.ref });
+    ok('says nothing was charged', /Nothing was charged/.test(textOf(r)) && !blockOf(r, 'placed'));
+    eq('no order was made', mock.admin.placed.length, before);
+    ok('and offers to pay again or switch to cash on delivery', r.chips.some((c) => c.act && c.act.t === 'place') && r.chips.some((c) => c.act && c.act.t === 'pay' && c.act.p === 'cod'));
+    r = await bot.reply('not now');
+    ok('"not now" leaves the bag for later', /nothing was placed/i.test(textOf(r)));
+  }
+
+  section('the bag, by chat');
+  {
+    const bot = buyer(shopFor());
+    const one = mock.products.filter((p) => p.availableForSale && p.variants.length === 1);
+    await bot.reply('buy ' + one[0].title);
+    await bot.reply('add ' + one[1].title);
+    let r = await bot.reply('what is in my cart');
+    eq('"what is in my cart" shows both lines', blockOf(r, 'bag').lines.length, 2);
+    r = await bot.reply('remove the first one');
+    ok('"remove the first one" removes it', /Removed/.test(textOf(r)) && blockOf(r, 'bag').count === 1);
+    r = await bot.act({ t: 'qty', line: (await S.cartGet()).lines[0].lineId, q: 3 });
+    eq('the + button sets the quantity', blockOf(r, 'bag').count, 3);
+    r = await bot.reply('empty my bag');
+    ok('"empty my bag" asks first', /Remove everything/.test(textOf(r)));
+    r = await bot.reply('yes');
+    ok('and does it on yes', /bag is empty/i.test(textOf(r)) && (await S.cartGet()) && (await S.cartGet()).count === 0);
+  }
+
+  section('ordering the same again');
+  {
+    const bot = buyer(shopFor({ saved: Object.assign({ state: 'KA' }, ADDR, { phone: '9845012345' }) }));
+    let r = await bot.reply('order again');
+    ok('asks which order', /Which order/.test(textOf(r)));
+    r = await bot.reply('#1001');
+    ok('then for its phone or email', /phone number or email/.test(textOf(r)));
+    r = await bot.reply('asha@example.com');
+    ok('puts its items back in the bag and heads to checkout', /Added 2 of 2 items from #1001/.test(textOf(r)) && blockOf(r, 'savedAddress'));
+  }
+
+  section('a person, with the conversation');
+  {
+    const bot = buyer(shopFor());
+    await bot.reply('buy ' + mock.products.find((p) => p.availableForSale && p.variants.length === 1).title);
+    const r = await bot.reply('talk to a person');
+    const wa = (blockOf(r, 'links').links.find((l) => /wa\.me/.test(l.href)) || {}).href || '';
+    const msg = decodeURIComponent(wa.split('text=')[1] || '');
+    ok('the WhatsApp message carries the bag and what was asked', /In my bag:/.test(msg) && /I asked:/.test(msg));
+  }
+
+  section('robust');
+  {
+    const bot = buyer(shopFor());
+    let r = await bot.reply('start over');
+    ok('"start over" starts again', /I can find the right product/.test(textOf(r)));
+    r = await bot.act({ t: 'nonsense' });
+    ok('an unknown button is answered, not an error', /expired/.test(textOf(r)));
+    r = await bot.reply('');
+    ok('an empty message gets the welcome', /I can find/.test(textOf(r)));
+    r = await bot.reply('yes');
+    ok('a stray "yes" is answered', r.blocks.length > 0);
+    r = await bot.reply('qwzx plorb');
+    ok('nonsense is answered with a way forward', r.chips.length > 0);
+    const down = A.create({ S: Object.assign({}, S, { searchAll: () => Promise.reject(new Error('down')), cartId: () => null }), C: C, collections: cols });
+    r = await down.reply('buy acana puppy');
+    ok('the store not answering is a polite answer, not a crash', /could not reach the store/i.test(textOf(r)));
   }
 
   section('before tracking is connected');
@@ -188,7 +364,7 @@ const orderOf = (r) => (r.blocks.find((b) => b.type === 'order') || {}).order ||
     S.orderLookup = () => Promise.resolve({ found: false, configured: false });
     const bot = fresh();
     const r = await bot.reply('track #1001 asha@example.com');
-    ok('points to the confirmation email and the team instead', /confirmation email/i.test(textOf(r)) && r.blocks.some((b) => b.type === 'links'));
+    ok('points to the team instead, never to a page on the store', /our team/i.test(textOf(r)) && r.blocks.some((b) => b.type === 'links') && !/myshopify|pawsandtails24\.com\//.test(JSON.stringify(r)));
     S.orderLookup = real;
   }
 

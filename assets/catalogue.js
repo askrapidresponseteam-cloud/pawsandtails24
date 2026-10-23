@@ -23,6 +23,21 @@
   "delivery": {
     "fallbackDays": [3, 7]
   },
+  "checkout": {
+    "cod": true,
+    "codMaxRupees": null,
+    "razorpayScript": "https://checkout.razorpay.com/v1/checkout.js"
+  },
+  "states": [
+    ["AN", "Andaman and Nicobar Islands"], ["AP", "Andhra Pradesh"], ["AR", "Arunachal Pradesh"], ["AS", "Assam"],
+    ["BR", "Bihar"], ["CH", "Chandigarh"], ["CG", "Chhattisgarh"], ["DN", "Dadra and Nagar Haveli and Daman and Diu"],
+    ["DL", "Delhi"], ["GA", "Goa"], ["GJ", "Gujarat"], ["HR", "Haryana"], ["HP", "Himachal Pradesh"],
+    ["JK", "Jammu and Kashmir"], ["JH", "Jharkhand"], ["KA", "Karnataka"], ["KL", "Kerala"], ["LA", "Ladakh"],
+    ["LD", "Lakshadweep"], ["MP", "Madhya Pradesh"], ["MH", "Maharashtra"], ["MN", "Manipur"], ["ML", "Meghalaya"],
+    ["MZ", "Mizoram"], ["NL", "Nagaland"], ["OR", "Odisha"], ["PY", "Puducherry"], ["PB", "Punjab"],
+    ["RJ", "Rajasthan"], ["SK", "Sikkim"], ["TN", "Tamil Nadu"], ["TS", "Telangana"], ["TR", "Tripura"],
+    ["UP", "Uttar Pradesh"], ["UK", "Uttarakhand"], ["WB", "West Bengal"]
+  ],
   "policies": {
     "account": "/account",
     "refund": "/pages/returns",
